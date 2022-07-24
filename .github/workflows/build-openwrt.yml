@@ -89,17 +89,12 @@ jobs:
       id: package
       run: |
         cd openwrt
+        rm -fr feeds/packages/lang/golang
+        svn co https://github.com/openwrt/packages/trunk/lang/golang feeds/packages/lang/golang
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
-        
-    -name: Update Golang
-      run: |
-       cd openwrt
-       rm -fr feeds/packages/lang/golang
-       svn co https://github.com/openwrt/packages/trunk/lang/golang feeds/packages/lang/golang
-       echo "::set-output name=status::success"
        
     - name: Compile the packages
       id: compile
