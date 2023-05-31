@@ -85,7 +85,7 @@ jobs:
         cp -r openwrt-packages/luci-app-turboacc openwrt/package
         cp -r openwrt-packages/pdnsd-alt openwrt/package
         cp -r openwrt-packages/shortcut-fe openwrt/package
-        cd openwrt/package
+        cd openwrt
         git clone https://github.com/sirpdboy/luci-app-ddns-go.git package/ddns-go
 
     - name: SSH connection to Actions
