@@ -21,7 +21,7 @@ on:
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt/archive/refs/tags
-  REPO_BRANCH: v22.03.5
+  REPO_BRANCH: 22.03.5
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
@@ -60,9 +60,10 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        wget $REPO_URL/$REPO_BRANCH.zip
-        unzip $REPO_BRANCH.zip
-        rm -rf $REPO_BRANCH.zip
+        wget $REPO_URL/v$REPO_BRANCH.zip
+        unzip v$REPO_BRANCH.zip
+        rm -rf v$REPO_BRANCH.zip
+        mv openwrt-$REPO_BRANCH openwrt 
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         
     - name: Patch Packages
