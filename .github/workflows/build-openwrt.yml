@@ -87,6 +87,7 @@ jobs:
         cp -r openwrt-packages/shortcut-fe openwrt/package
         cd openwrt
         git clone https://github.com/sirpdboy/luci-app-ddns-go.git package/ddns-go
+        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/.config
 
     - name: SSH connection to Actions
       uses: mxschmitt/action-tmate@v3
