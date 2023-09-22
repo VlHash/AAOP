@@ -20,7 +20,7 @@ on:
         default: 'true'
 
 env:
-  REPO_URL: https://gitcode.net:mirrors/gl-inet/gl-infra-builder.git
+  REPO_URL: https://gitcode.net/mirrors/gl-inet/gl-infra-builder.git
   REPO_BRANCH: 19.07.10
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
