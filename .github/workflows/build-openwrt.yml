@@ -20,7 +20,7 @@ on:
         default: 'true'
 
 env:
-  REPO_URL: https://github.com/openwrt/openwrt/archive/refs/tags
+  REPO_URL: https://gitcode.net:mirrors/gl-inet/gl-infra-builder.git
   REPO_BRANCH: 19.07.10
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
@@ -60,48 +60,28 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        wget $REPO_URL/v$REPO_BRANCH.zip
-        unzip v$REPO_BRANCH.zip
-        rm -rf v$REPO_BRANCH.zip
-        mv openwrt-$REPO_BRANCH openwrt 
+        git $REPO_URL
+        cd gl-infra-builder
+        git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
+        python3 setup.py -c configs/config-wlan-ap.yml
+        cp -r wlan-ap/openwrt ../
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-        
-    - name: Patch Packages
-      run: cd openwrt && sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default && sed -i '$a src-git small https://github.com/kenzok8/small' feeds.conf.default
-      
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Get packages
       run: |
-        git clone https://github.com/kiddin9/openwrt-packages.git
-    
+        cd openwrt
+        git https://github.com/Zxilly/UA2F package/UA2F
+        ./scripts/gen_config.py target_wlan_ap-gl-axt1800
+
     - name: Custom sh
       run: |
-        cp -r openwrt-packages/dnsforwarder openwrt/package
-        cp -r openwrt-packages/luci-app-turboacc openwrt/package
-        cp -r openwrt-packages/pdnsd-alt openwrt/package
-        cp -r openwrt-packages/shortcut-fe openwrt/package
         cd openwrt
-        git clone https://github.com/sirpdboy/luci-app-ddns-go.git package/ddns-go
-        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/.config
+        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/y99urn.config
+        mv y99urn.config .config
 
     - name: SSH connection to Actions
       uses: mxschmitt/action-tmate@v3
       if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        rm -rf ./tmp ./build_dir
-        make defconfig
-        make download V=s
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
        
     - name: Compile Source
       id: compile
