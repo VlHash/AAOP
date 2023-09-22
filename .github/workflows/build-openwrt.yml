@@ -64,17 +64,18 @@ jobs:
         cd gl-infra-builder
         git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
         python3 setup.py -c configs/config-wlan-ap.yml
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/gl-infra-builder/wlan-ap/openwrt
 
     - name: Install feeds
+      working-directory: /workdir
       run: |
-        cd openwrt
+        cd gl-infra-builder/wlan-ap/openwrt
         git clone https://github.com/Zxilly/UA2F package/UA2F
         ./scripts/gen_config.py target_wlan_ap-gl-axt1800
 
     - name: Custom sh
+      working-directory: /workdir
       run: |
-        cd openwrt
+        cd gl-infra-builder/wlan-ap/openwrt
         wget https://raw.githubusercontent.com/SkyFaklist/storage/master/y99urn.config
         rm -rf .config
         mv y99urn.config .config
@@ -86,7 +87,7 @@ jobs:
     - name: Compile Source
       id: compile
       run: |
-        cd openwrt
+        cd gl-infra-builder/wlan-ap/openwrt
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "::set-output name=status::success"
@@ -103,16 +104,17 @@ jobs:
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+        path: gl-infra-builder/wlan-ap/openwrt/bin
 
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
+        cd gl-infra-builder/wlan-ap/openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "::set-output name=status::success"
+        
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
