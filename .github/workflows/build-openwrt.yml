@@ -77,6 +77,7 @@ jobs:
       run: |
         cd openwrt
         wget https://raw.githubusercontent.com/SkyFaklist/storage/master/y99urn.config
+        rm -rf .config
         mv y99urn.config .config
 
     - name: SSH connection to Actions
