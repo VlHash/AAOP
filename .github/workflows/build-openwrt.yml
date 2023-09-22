@@ -60,7 +60,7 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git $REPO_URL
+        git clone $REPO_URL
         cd gl-infra-builder
         git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
         python3 setup.py -c configs/config-wlan-ap.yml
