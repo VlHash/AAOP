@@ -64,7 +64,6 @@ jobs:
         cd gl-infra-builder
         git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
         python3 setup.py -c configs/config-wlan-ap.yml
-        cp -r wlan-ap/openwrt ../
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/gl-infra-builder/wlan-ap/openwrt
 
     - name: Install feeds
