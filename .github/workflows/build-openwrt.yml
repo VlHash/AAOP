@@ -86,6 +86,7 @@ jobs:
        
     - name: Compile Source
       id: compile
+      working-directory: /workdir
       run: |
         cd gl-infra-builder/wlan-ap/openwrt
         echo -e "$(nproc) thread compile"
@@ -104,9 +105,10 @@ jobs:
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: gl-infra-builder/wlan-ap/openwrt/bin
+        path: /workdir/gl-infra-builder/wlan-ap/openwrt/bin
 
     - name: Organize files
+      working-directory: /workdir
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
