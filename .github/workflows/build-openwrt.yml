@@ -70,7 +70,7 @@ jobs:
     - name: Install feeds
       run: |
         cd openwrt
-        git https://github.com/Zxilly/UA2F package/UA2F
+        git clone https://github.com/Zxilly/UA2F package/UA2F
         ./scripts/gen_config.py target_wlan_ap-gl-axt1800
 
     - name: Custom sh
