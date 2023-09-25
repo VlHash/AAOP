@@ -20,8 +20,8 @@ on:
         default: 'true'
 
 env:
-  REPO_URL: https://gitcode.net/mirrors/gl-inet/gl-infra-builder.git
-  REPO_BRANCH: 19.07.10
+  REPO_URL: https://github.com/gl-inet/openwrt
+  REPO_BRANCH: openwrt-21.02.0
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
@@ -60,23 +60,21 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL
-        cd gl-infra-builder
+        git clone $REPO_URL -b openwrt-21.02.0
+        cd openwrt
         git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
-        python3 setup.py -c configs/config-wlan-ap.yml
 
     - name: Install feeds
       working-directory: /workdir
       run: |
-        cd gl-infra-builder/wlan-ap/openwrt
+        cd openwrt
         git clone https://github.com/Zxilly/UA2F package/UA2F
-        ./scripts/gen_config.py target_wlan_ap-gl-axt1800
 
     - name: Custom sh
       working-directory: /workdir
       run: |
-        cd gl-infra-builder/wlan-ap/openwrt
-        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/y99urn.config
+        cd openwrt
+        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/bvwk1a.config
         rm -rf .config
         mv y99urn.config .config
 
@@ -88,7 +86,7 @@ jobs:
       id: compile
       working-directory: /workdir
       run: |
-        cd gl-infra-builder/wlan-ap/openwrt
+        cd openwrt
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "::set-output name=status::success"
@@ -105,7 +103,7 @@ jobs:
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: /workdir/gl-infra-builder/wlan-ap/openwrt/bin
+        path: /workdir/openwrt/bin
 
     - name: Organize files
       working-directory: /workdir
