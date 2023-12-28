@@ -20,7 +20,7 @@ on:
         default: 'true'
 
 env:
-  REPO_URL: https://github.com/gl-inet/openwrt
+  REPO_URL: https://github.com/JiaY-shi/openwrt.git
   REPO_BRANCH: openwrt-21.02.0
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
@@ -60,23 +60,30 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b openwrt-21.02.0
+        git clone $REPO_URL -b ipq60xx-devel
         cd openwrt
         git config --global user.email skyfaklist@gmail.com && git config --global user.name SkyFaklist
 
-    - name: Install feeds
+    - name: Update & Install feeds
       working-directory: /workdir
       run: |
-        cd openwrt
+        cd openwrt/packages
+        git clone https://github.com/CHN-beta/rkp-ipid
         git clone https://github.com/Zxilly/UA2F package/UA2F
+        cd ..
+        sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
+        sed -i '$a src-git small https://github.com/kenzok8/small' feeds.conf.default
+        git pull
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
     - name: Custom sh
       working-directory: /workdir
       run: |
         cd openwrt
-        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/bvwk1a.config
+        wget https://raw.githubusercontent.com/SkyFaklist/storage/master/hald2x.config
         rm -rf .config
-        mv y99urn.config .config
+        mv hald2x.config .config
 
     - name: SSH connection to Actions
       uses: mxschmitt/action-tmate@v3
