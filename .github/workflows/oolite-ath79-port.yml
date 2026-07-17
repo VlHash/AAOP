@@ -1,0 +1,496 @@
+name: Oolite v5.2 ath79 port lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_ref:
+        description: "Official OpenWrt branch or tag"
+        required: true
+        default: "v25.12.5"
+        type: string
+      enable_ssh:
+        description: "Pause in a restricted tmate SSH session"
+        required: true
+        default: true
+        type: boolean
+      build_after_ssh:
+        description: "Build after the SSH session is closed"
+        required: true
+        default: true
+        type: boolean
+      device_config_symbol:
+        description: "Target device Kconfig symbol"
+        required: true
+        default: "CONFIG_TARGET_ath79_generic_DEVICE_gainstrong_oolite-v5-2"
+        type: string
+      save_heavy_build_state:
+        description: "Archive selected build_dir/staging_dir state (large)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oolite-ath79-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  CONTROLLER_DIR: ${{ github.workspace }}/controller
+  OPENWRT_DIR: ${{ github.workspace }}/openwrt
+  EVIDENCE_DIR: ${{ github.workspace }}/evidence
+  STATE_DIR: ${{ github.workspace }}/port-state
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  VENDOR_COMMIT: 8c64824576598117958691853de68bf4dcfc3c06
+
+jobs:
+  port-and-build:
+    name: Prepare, SSH, build and export
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out controller repository
+        uses: actions/checkout@v4.2.2
+        with:
+          path: controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record run metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          safe_ref="$(printf '%s' '${{ inputs.openwrt_ref }}' | tr '/: ' '___')"
+          echo "safe_ref=${safe_ref}" >> "$GITHUB_OUTPUT"
+          mkdir -p "$EVIDENCE_DIR" "$STATE_DIR"
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "actor=${GITHUB_ACTOR}"
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "openwrt_ref=${{ inputs.openwrt_ref }}"
+            echo "vendor_commit=${VENDOR_COMMIT}"
+            date -u +"started_utc=%Y-%m-%dT%H:%M:%SZ"
+          } | tee "$STATE_DIR/run-metadata.txt"
+
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune --all --force --volumes || true
+          df -h
+
+      - name: Install OpenWrt build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            asciidoc autoconf automake autopoint bc binutils bison build-essential \
+            bzip2 ccache clang cmake curl device-tree-compiler diffutils file flex \
+            g++ g++-multilib gawk gcc gcc-multilib gettext git help2man jq \
+            libelf-dev liblzma-dev libncurses-dev libssl-dev libtool-bin \
+            libxml2-utils libxslt1-dev make mtd-utils ninja-build patch \
+            pkg-config python3 python3-dev python3-pip python3-setuptools \
+            python3-pyelftools rsync sharutils subversion swig tar texinfo time \
+            tree u-boot-tools unzip uuid-runtime wget xxd xz-utils zlib1g-dev zstd
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          unset SED GREP_OPTIONS
+          gcc --version | head -1
+          python3 --version
+          df -h
+
+      - name: Fetch official OpenWrt source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$OPENWRT_DIR"
+          git -C "$OPENWRT_DIR" remote add origin https://github.com/openwrt/openwrt.git
+          git -C "$OPENWRT_DIR" fetch --depth=1 origin "${{ inputs.openwrt_ref }}"
+          git -C "$OPENWRT_DIR" checkout --detach FETCH_HEAD
+          git -C "$OPENWRT_DIR" config user.name "Oolite Port Action"
+          git -C "$OPENWRT_DIR" config user.email "oolite-port-action@users.noreply.github.com"
+          git -C "$OPENWRT_DIR" rev-parse HEAD | tee "$STATE_DIR/openwrt-commit.txt"
+          git -C "$OPENWRT_DIR" status --short --branch
+
+      - name: Restore download and compiler caches
+        uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ${{ env.OPENWRT_DIR }}/dl
+            ${{ env.CCACHE_DIR }}
+          key: oolite-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-${{ hashFiles('controller/port/config.seed', 'controller/port/patches/**', 'controller/port/files/**') }}
+          restore-keys: |
+            oolite-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-
+            oolite-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Collect vendor and reference evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          vendor_raw="https://raw.githubusercontent.com/GainStrongService/openwrt/${VENDOR_COMMIT}"
+          vendor_commit_url="https://github.com/GainStrongService/openwrt/commit/${VENDOR_COMMIT}.patch"
+
+          mkdir -p "$EVIDENCE_DIR/vendor-ar71xx" "$EVIDENCE_DIR/reference-ath79"
+
+          curl --fail --location --retry 4 \
+            "$vendor_commit_url" \
+            --output "$EVIDENCE_DIR/vendor-ar71xx/0001-ar71xx-add-oolite-v5.2.patch"
+
+          files=(
+            "target/linux/ar71xx/files/arch/mips/ath79/mach-gs-oolite-v5-2.c"
+            "target/linux/ar71xx/image/common-tp-link.mk"
+            "target/linux/ar71xx/image/generic.mk"
+            "target/linux/ar71xx/base-files/etc/board.d/02_network"
+            "target/linux/ar71xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata"
+            "target/linux/ar71xx/base-files/lib/upgrade/platform.sh"
+          )
+
+          for rel in "${files[@]}"; do
+            dst="$EVIDENCE_DIR/vendor-ar71xx/$rel"
+            mkdir -p "$(dirname "$dst")"
+            curl --fail --location --retry 4 \
+              "$vendor_raw/$rel" \
+              --output "$dst"
+          done
+
+          refs=(
+            "target/linux/ath79/dts/qca9531_qxwlan_e600g.dtsi"
+            "target/linux/ath79/dts/qca9531_qxwlan_e600gac-v2-16m.dts"
+            "target/linux/ath79/image/common-tp-link.mk"
+            "target/linux/ath79/image/generic.mk"
+            "target/linux/ath79/image/generic-tp-link.mk"
+          )
+
+          for rel in "${refs[@]}"; do
+            if [[ -f "$OPENWRT_DIR/$rel" ]]; then
+              dst="$EVIDENCE_DIR/reference-ath79/$rel"
+              mkdir -p "$(dirname "$dst")"
+              cp -a "$OPENWRT_DIR/$rel" "$dst"
+            fi
+          done
+
+          mkdir -p "$EVIDENCE_DIR/hardware"
+          hardware_base="https://raw.githubusercontent.com/GainStrongService/Oolite-Hardware/main/Oolite%20V5.2"
+          curl --fail --location --retry 4 \
+            "$hardware_base/Oolite%20V5.2%20Spec%20V1.1.0.pdf" \
+            --output "$EVIDENCE_DIR/hardware/Oolite-V5.2-Spec-V1.1.0.pdf"
+          curl --fail --location --retry 4 \
+            "$hardware_base/Oolite%20V5.2-Dev%20Spec%20V1.0.0.pdf" \
+            --output "$EVIDENCE_DIR/hardware/Oolite-V5.2-Dev-Spec-V1.0.0.pdf"
+          curl --fail --location --retry 4 \
+            "$hardware_base/Oolite%20V5.2-Dev-SCH-V1.0.21.pdf" \
+            --output "$EVIDENCE_DIR/hardware/Oolite-V5.2-Dev-SCH-V1.0.21.pdf"
+
+          grep -RInE \
+            'oolite-v5\.2|OOLITE-V5-2|0x3C00010B|CALDATA|caldata|0x5000|0x1000' \
+            "$EVIDENCE_DIR/vendor-ar71xx" \
+            > "$EVIDENCE_DIR/vendor-ar71xx/key-facts.txt" || true
+
+      - name: Apply persistent port files and patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [[ -d "$CONTROLLER_DIR/port/files" ]]; then
+            rsync -a \
+              --exclude '.gitkeep' \
+              "$CONTROLLER_DIR/port/files/" "$OPENWRT_DIR/"
+          fi
+
+          for patch in "$CONTROLLER_DIR"/port/patches/*.patch; do
+            echo "Checking patch: $patch"
+            if git -C "$OPENWRT_DIR" apply --check "$patch"; then
+              git -C "$OPENWRT_DIR" apply "$patch"
+            elif git -C "$OPENWRT_DIR" apply --reverse --check "$patch"; then
+              echo "Patch is already applied: $patch"
+            else
+              echo "::error::Patch cannot be applied cleanly: $patch"
+              exit 1
+            fi
+          done
+
+      - name: Update and install feeds
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a 2>&1 | tee "$STATE_DIR/feeds-update.log"
+          ./scripts/feeds install -a 2>&1 | tee "$STATE_DIR/feeds-install.log"
+
+      - name: Create baseline ath79 configuration
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          {
+            echo "CONFIG_TARGET_ath79=y"
+            echo "CONFIG_TARGET_ath79_generic=y"
+            echo "CONFIG_DEVEL=y"
+            echo "CONFIG_BUILD_LOG=y"
+            echo "CONFIG_CCACHE=y"
+            if [[ -f "$CONTROLLER_DIR/port/config.seed" ]]; then
+              cat "$CONTROLLER_DIR/port/config.seed"
+            fi
+          } > .config
+
+          make defconfig
+          ./scripts/diffconfig.sh | tee "$STATE_DIR/baseline.diffconfig"
+
+      - name: Write interactive porting notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$OPENWRT_DIR/PORTING-NOTES.txt" <<'NOTES'
+          Oolite v5.2 ath79 interactive workspace
+          =======================================
+
+          Main workspace:
+            cd "$GITHUB_WORKSPACE/openwrt"
+
+          Vendor evidence:
+            "$GITHUB_WORKSPACE/evidence/vendor-ar71xx"
+
+          Closest ath79 reference:
+            target/linux/ath79/dts/qca9531_qxwlan_e600g.dtsi
+            target/linux/ath79/dts/qca9531_qxwlan_e600gac-v2-16m.dts
+
+          High-confidence facts from the old ar71xx support:
+            SoC: QCA9531
+            PCIe radio: QCA9887
+            flash: 16 MiB SPI NOR
+            WAN MAC: ART + 0
+            LAN MAC: ART + 6
+            QCA9531 WMAC calibration: ART + 0x1000
+            QCA9887 calibration: ART + 0x5000, length 0x844
+            reset button: GPIO 17, active low
+            development-board system LED: GPIO 13, active high
+            TP-Link v1 HWID: 0x3C00010B
+            old image profile: tplink-16mlzma
+
+          Required files normally include:
+            target/linux/ath79/dts/qca9531_gainstrong_oolite-v5-2.dts
+            target/linux/ath79/image/generic.mk
+            target/linux/ath79/generic/base-files/etc/board.d/02_network
+            target/linux/ath79/generic/base-files/etc/board.d/01_leds
+            target/linux/ath79/generic/base-files/lib/upgrade/platform.sh
+            (only where current OpenWrt conventions require them)
+
+          Useful checks:
+            git status --short
+            git diff --check
+            make menuconfig
+            make target/linux/compile -j"$(nproc)" V=s
+            make -j"$(nproc)" V=s
+
+          To close the SSH session and let the workflow continue:
+            sudo touch /continue
+
+          Do not flash a persistent image until the real /proc/mtd layout,
+          bootloader recovery path and ART location have been verified.
+          NOTES
+
+          cat "$OPENWRT_DIR/PORTING-NOTES.txt"
+
+      - name: Restricted interactive SSH porting session
+        if: ${{ inputs.enable_ssh }}
+        continue-on-error: true
+        timeout-minutes: 90
+        uses: mxschmitt/action-tmate@v3.24
+        with:
+          limit-access-to-actor: true
+
+      - name: Refresh feeds and select the ported device
+        if: ${{ inputs.build_after_ssh }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          symbol="${{ inputs.device_config_symbol }}"
+          grep -v "^${symbol}=" .config > .config.new || true
+          mv .config.new .config
+          echo "${symbol}=y" >> .config
+          make defconfig
+
+          if ! grep -Fxq "${symbol}=y" .config; then
+            echo "::error::The requested device symbol was not accepted: ${symbol}"
+            echo "The image recipe may be missing or the symbol name may be wrong."
+            exit 2
+          fi
+
+          ./scripts/diffconfig.sh | tee "$STATE_DIR/pre-build.diffconfig"
+
+      - name: Download OpenWrt sources
+        if: ${{ inputs.build_after_ssh }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -o pipefail
+          find dl -type f -size -1024c -delete 2>/dev/null || true
+          make download -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/download.log"
+
+      - name: Build Oolite image
+        id: build
+        if: ${{ inputs.build_after_ssh }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set +e
+          set -o pipefail
+
+          make -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/build-parallel.log"
+          rc=${PIPESTATUS[0]}
+
+          if [[ "$rc" -ne 0 ]]; then
+            echo "Parallel build failed with rc=$rc; retrying serially for diagnostics."
+            make -j1 V=s 2>&1 | tee "$STATE_DIR/build-serial.log"
+            serial_rc=${PIPESTATUS[0]}
+            if [[ "$serial_rc" -ne 0 ]]; then
+              rc="$serial_rc"
+            fi
+          fi
+
+          echo "$rc" | tee "$STATE_DIR/build-exit-code.txt"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Export source changes and key directories
+        if: ${{ always() }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STATE_DIR/source" "$STATE_DIR/config" "$STATE_DIR/logs"
+
+          git status --short --branch | tee "$STATE_DIR/source/git-status.txt"
+          git diff --stat | tee "$STATE_DIR/source/git-diff-stat.txt"
+          git diff --check | tee "$STATE_DIR/source/git-diff-check.txt" || true
+          git diff --binary > "$STATE_DIR/source/oolite-ath79-worktree.patch"
+          git ls-files --others --exclude-standard \
+            > "$STATE_DIR/source/untracked-files.txt"
+
+          if [[ -s "$STATE_DIR/source/untracked-files.txt" ]]; then
+            tar --zstd -cf "$STATE_DIR/source/untracked-files.tar.zst" \
+              -T "$STATE_DIR/source/untracked-files.txt"
+          fi
+
+          cp -a .config "$STATE_DIR/config/full.config" 2>/dev/null || true
+          ./scripts/diffconfig.sh > "$STATE_DIR/config/diffconfig.txt" 2>/dev/null || true
+          cp -a feeds.conf.default "$STATE_DIR/config/" 2>/dev/null || true
+          cp -a PORTING-NOTES.txt "$STATE_DIR/" 2>/dev/null || true
+
+          source_paths=()
+          for path in \
+            target/linux/ath79/dts \
+            target/linux/ath79/image \
+            target/linux/ath79/base-files \
+            target/linux/ath79/generic/base-files; do
+            [[ -e "$path" ]] && source_paths+=("$path")
+          done
+
+          if (( ${#source_paths[@]} )); then
+            tar --zstd -cf "$STATE_DIR/source/ath79-key-tree.tar.zst" \
+              "${source_paths[@]}"
+          fi
+
+          if [[ -d logs ]]; then
+            tar --zstd -cf "$STATE_DIR/logs/openwrt-build-logs.tar.zst" logs
+          fi
+
+          if [[ -d bin/targets/ath79/generic ]]; then
+            find bin/targets/ath79/generic -maxdepth 2 -type f \
+              -printf '%P\t%s bytes\n' \
+              | sort > "$STATE_DIR/firmware-files.txt"
+          fi
+
+          cp -a "$EVIDENCE_DIR" "$STATE_DIR/evidence"
+          df -h > "$STATE_DIR/disk-usage.txt"
+          du -sh "$OPENWRT_DIR" "$STATE_DIR" 2>/dev/null \
+            > "$STATE_DIR/directory-sizes.txt" || true
+
+      - name: Archive selected heavy build state
+        if: ${{ always() && inputs.save_heavy_build_state }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          heavy_paths=()
+
+          while IFS= read -r -d '' path; do
+            heavy_paths+=("${path#./}")
+          done < <(
+            find build_dir staging_dir -maxdepth 1 -mindepth 1 \
+              \( -name 'target-*' -o -name 'toolchain-*' \) \
+              -print0 2>/dev/null
+          )
+
+          [[ -d tmp ]] && heavy_paths+=("tmp")
+
+          if (( ${#heavy_paths[@]} )); then
+            tar --zstd -cf "$STATE_DIR/heavy-build-state.tar.zst" \
+              "${heavy_paths[@]}"
+          fi
+
+      - name: Upload migration state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: oolite-port-state-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.STATE_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 6
+          retention-days: 21
+
+      - name: Upload built firmware
+        if: ${{ always() && hashFiles('openwrt/bin/targets/ath79/generic/**') != '' }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: oolite-firmware-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.OPENWRT_DIR }}/bin/targets/ath79/generic
+            ${{ env.OPENWRT_DIR }}/bin/packages
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 21
+
+      - name: Write job summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "# Oolite v5.2 ath79 port run"
+            echo
+            echo "- OpenWrt ref: \`${{ inputs.openwrt_ref }}\`"
+            echo "- OpenWrt commit: \`$(cat "$STATE_DIR/openwrt-commit.txt" 2>/dev/null || echo unknown)\`"
+            echo "- SSH enabled: \`${{ inputs.enable_ssh }}\`"
+            echo "- Build requested: \`${{ inputs.build_after_ssh }}\`"
+            echo "- Device symbol: \`${{ inputs.device_config_symbol }}\`"
+            echo "- Build step outcome: \`${{ steps.build.outcome }}\`"
+            echo "- Build exit code: \`$(cat "$STATE_DIR/build-exit-code.txt" 2>/dev/null || echo not-run)\`"
+            echo
+            echo "Download the **oolite-port-state** artifact even when the build fails;"
+            echo "it contains the binary-capable git patch, untracked files, ath79 tree,"
+            echo "configuration, logs, vendor evidence and build diagnostics."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the workflow when the requested build failed
+        if: ${{ always() && inputs.build_after_ssh && steps.build.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::error::The requested OpenWrt build failed. Port state and logs were uploaded."
+          exit 1
