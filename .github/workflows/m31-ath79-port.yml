@@ -1,0 +1,605 @@
+name: Embstar M31 ath79 port lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_ref:
+        description: "Official OpenWrt branch or tag"
+        required: true
+        default: "v25.12.5"
+        type: string
+      prepare_toolchain_before_ssh:
+        description: "Build and validate host tools plus the MIPS toolchain before SSH"
+        required: true
+        default: true
+        type: boolean
+      enable_ssh:
+        description: "Expose standard OpenSSH through an OpenFrp TCP tunnel"
+        required: true
+        default: false
+        type: boolean
+      openfrp_endpoint:
+        description: "OpenFrp node address shown in the tunnel details"
+        required: true
+        default: "replace-with-node-address"
+        type: string
+      openfrp_remote_port:
+        description: "OpenFrp remote TCP port shown in the tunnel details"
+        required: true
+        default: "0"
+        type: string
+      build_after_ssh:
+        description: "Run target/linux and DTB validation after SSH"
+        required: true
+        default: true
+        type: boolean
+      full_image_after_target:
+        description: "Build M31 initramfs and sysupgrade images after DTB validation"
+        required: true
+        default: true
+        type: boolean
+      save_heavy_build_state:
+        description: "Archive selected build/toolchain directories in the state artifact"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m31-ath79-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  CONTROLLER_DIR: ${{ github.workspace }}/controller
+  OPENWRT_DIR: ${{ github.workspace }}/openwrt
+  EVIDENCE_DIR: ${{ github.workspace }}/evidence
+  STATE_DIR: ${{ github.workspace }}/port-state
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  EMBSTAR_VENDOR_COMMIT: ac4e1537e1b4701d62b1b628244258058d793d03
+  DEVICE_CONFIG_SYMBOL: CONFIG_TARGET_ath79_generic_DEVICE_embstar_m31
+  DEVICE_ID: embstar_m31
+  DTS_NAME: qca9531_embstar_m31
+
+jobs:
+  port-and-build:
+    name: Prepare, optional SSH, validate and export
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+
+    steps:
+      - name: Check out controller repository
+        uses: actions/checkout@v4.2.2
+        with:
+          path: controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record run metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          safe_ref="$(printf '%s' '${{ inputs.openwrt_ref }}' | tr '/: ' '___')"
+          echo "safe_ref=${safe_ref}" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "$EVIDENCE_DIR/vendor-embstar"             "$EVIDENCE_DIR/reference-ath79"             "$STATE_DIR/logs" "$STATE_DIR/config" "$STATE_DIR/source"             "$STATE_DIR/firmware" "$STATE_DIR/reuse/port/patches"
+
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "actor=${GITHUB_ACTOR}"
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "openwrt_ref=${{ inputs.openwrt_ref }}"
+            echo "embstar_vendor_commit=${EMBSTAR_VENDOR_COMMIT}"
+            echo "device=${DEVICE_ID}"
+            date -u +"started_utc=%Y-%m-%dT%H:%M:%SZ"
+          } | tee "$STATE_DIR/run-metadata.txt"
+
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc             /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune --all --force --volumes || true
+          df -h
+
+      - name: Install OpenWrt and SSH dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends             asciidoc autoconf automake autopoint bc binutils bison build-essential             bzip2 ccache clang cmake curl device-tree-compiler diffutils file flex             g++ g++-multilib gawk gcc gcc-multilib gettext git help2man jq             libelf-dev liblzma-dev libncurses-dev libssl-dev libtool-bin             libxml2-utils libxslt1-dev make mtd-utils ninja-build openssh-server             patch pkg-config python3 python3-dev python3-pip python3-setuptools             python3-pyelftools rsync screen sharutils subversion swig tar texinfo             time tmux tree u-boot-tools unzip uuid-runtime wget xxd xz-utils             zlib1g-dev zstd
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Fetch official OpenWrt source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$OPENWRT_DIR"
+          git -C "$OPENWRT_DIR" remote add origin https://github.com/openwrt/openwrt.git
+          git -C "$OPENWRT_DIR" fetch --depth=1 origin "${{ inputs.openwrt_ref }}"
+          git -C "$OPENWRT_DIR" checkout --detach FETCH_HEAD
+          git -C "$OPENWRT_DIR" switch -c port/embstar-m31-ath79
+          git -C "$OPENWRT_DIR" config user.name "M31 Port Action"
+          git -C "$OPENWRT_DIR" config user.email "m31-port-action@users.noreply.github.com"
+          git -C "$OPENWRT_DIR" rev-parse HEAD | tee "$STATE_DIR/openwrt-commit.txt"
+
+      - name: Restore downloads and ccache
+        uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ${{ env.OPENWRT_DIR }}/dl
+            ${{ env.CCACHE_DIR }}
+          key: m31-downloads-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-${{ hashFiles('controller/port/**') }}
+          restore-keys: |
+            m31-downloads-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-
+            m31-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore host tools and MIPS toolchain cache
+        id: toolchain-cache
+        if: ${{ inputs.prepare_toolchain_before_ssh }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.OPENWRT_DIR }}/staging_dir/host
+            ${{ env.OPENWRT_DIR }}/staging_dir/hostpkg
+            ${{ env.OPENWRT_DIR }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_DIR }}/build_dir/host
+            ${{ env.OPENWRT_DIR }}/build_dir/hostpkg
+            ${{ env.OPENWRT_DIR }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_DIR }}/tmp/stage-tools
+            ${{ env.OPENWRT_DIR }}/tmp/stage-toolchain
+          key: m31-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-${{ hashFiles('controller/port/config.seed') }}
+          restore-keys: |
+            m31-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-
+
+      - name: Collect Embstar vendor and current ath79 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          vendor_raw="https://raw.githubusercontent.com/Embstar/QCA9531_OpenWrt/${EMBSTAR_VENDOR_COMMIT}"
+          vendor_files=(
+            "target/linux/ath79/dts/qca9531_embstar.dts"
+            "target/linux/ath79/image/generic.mk"
+            "target/linux/ath79/generic/base-files/etc/board.d/02_network"
+            "target/linux/ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata"
+            ".config"
+          )
+
+          for rel in "${vendor_files[@]}"; do
+            dst="$EVIDENCE_DIR/vendor-embstar/$rel"
+            mkdir -p "$(dirname "$dst")"
+            curl --fail --location --retry 4 "$vendor_raw/$rel" --output "$dst"
+          done
+
+          refs=(
+            "target/linux/ath79/dts/qca953x.dtsi"
+            "target/linux/ath79/dts/qca9531_glinet_gl-ar750.dts"
+            "target/linux/ath79/dts/qca9531_qxwlan_e600g.dtsi"
+            "target/linux/ath79/dts/qca9531_qxwlan_e600gac-v2-16m.dts"
+            "target/linux/ath79/image/generic.mk"
+            "target/linux/ath79/generic/base-files/etc/board.d/02_network"
+          )
+
+          for rel in "${refs[@]}"; do
+            if [[ -f "$OPENWRT_DIR/$rel" ]]; then
+              dst="$EVIDENCE_DIR/reference-ath79/$rel"
+              mkdir -p "$(dirname "$dst")"
+              cp -a "$OPENWRT_DIR/$rel" "$dst"
+            fi
+          done
+
+      - name: Apply M31 overlay and persistent patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          rsync -a --exclude '.gitkeep' "$CONTROLLER_DIR/port/files/" "$OPENWRT_DIR/"
+          python3 "$CONTROLLER_DIR/port/apply-m31.py" "$OPENWRT_DIR"
+
+          for patch in "$CONTROLLER_DIR"/port/patches/*.patch; do
+            echo "Checking extra patch: $patch"
+            if git -C "$OPENWRT_DIR" apply --check "$patch"; then
+              git -C "$OPENWRT_DIR" apply "$patch"
+            elif git -C "$OPENWRT_DIR" apply --reverse --check "$patch"; then
+              echo "Patch already applied: $patch"
+            else
+              echo "::error::Patch cannot be applied cleanly: $patch"
+              exit 1
+            fi
+          done
+
+          git -C "$OPENWRT_DIR" diff --check
+          git -C "$OPENWRT_DIR" status --short
+
+      - name: Update and install feeds
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a 2>&1 | tee "$STATE_DIR/logs/feeds-update.log"
+          ./scripts/feeds install -a 2>&1 | tee "$STATE_DIR/logs/feeds-install.log"
+
+      - name: Create M31 ath79 configuration
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          cp "$CONTROLLER_DIR/port/config.seed" .config
+          rm -f tmp/.config-target.in tmp/.config-target.in.prereq
+          make defconfig
+
+          grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config || {
+            echo "::error::M31 device symbol was not accepted."
+            exit 2
+          }
+          ./scripts/diffconfig.sh | tee "$STATE_DIR/config/baseline.diffconfig"
+
+      - name: Prepare persistent SSH shell environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$HOME/.openwrt-action-env" <<EOF
+          export GITHUB_WORKSPACE="$GITHUB_WORKSPACE"
+          export CONTROLLER_DIR="$CONTROLLER_DIR"
+          export OPENWRT_DIR="$OPENWRT_DIR"
+          export EVIDENCE_DIR="$EVIDENCE_DIR"
+          export STATE_DIR="$STATE_DIR"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export LC_ALL=C
+          export LANG=C
+          owrt() { cd "\$OPENWRT_DIR"; }
+          owrt-env() { env | grep -E '^(OPENWRT_DIR|EVIDENCE_DIR|STATE_DIR|CCACHE_DIR)='; }
+          port-status() {
+            cd "\$OPENWRT_DIR" || return
+            git status --short --branch
+            grep -E 'CONFIG_TARGET_ath79|embstar_m31|ROOTFS_INITRAMFS' .config || true
+          }
+          EOF
+
+          source_line='[ -f "$HOME/.openwrt-action-env" ] && . "$HOME/.openwrt-action-env"'
+          grep -qxF "$source_line" "$HOME/.bashrc" || echo "$source_line" >> "$HOME/.bashrc"
+          grep -qxF "$source_line" "$HOME/.profile" || echo "$source_line" >> "$HOME/.profile"
+
+          sudo tee /usr/local/sbin/finish-porting >/dev/null <<'FINISH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          touch /continue
+          echo "M31 porting session released."
+          FINISH
+          sudo chmod 0755 /usr/local/sbin/finish-porting
+
+      - name: Build and validate host tools
+        if: ${{ inputs.prepare_toolchain_before_ssh }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          if [[ ! -x staging_dir/host/bin/m4 ]] || ! staging_dir/host/bin/m4 --version >/dev/null 2>&1; then
+            rm -rf build_dir/host build_dir/hostpkg staging_dir/host staging_dir/hostpkg tmp/stage-tools
+            make tools/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/tools-install.log" ||               make tools/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/tools-install-serial.log"
+          fi
+          staging_dir/host/bin/m4 --version | head | tee "$STATE_DIR/tools-validation.txt"
+
+      - name: Build and validate MIPS toolchain
+        if: ${{ inputs.prepare_toolchain_before_ssh }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          find_gcc() {
+            find staging_dir/toolchain-* \( -type f -o -type l \)               -name 'mips-openwrt-linux-musl-gcc' -print -quit 2>/dev/null
+          }
+          toolchain_gcc="$(find_gcc || true)"
+          if [[ -z "$toolchain_gcc" ]] || [[ ! -x "$toolchain_gcc" ]] || ! "$toolchain_gcc" --version >/dev/null 2>&1; then
+            rm -rf build_dir/toolchain-mips_24kc* staging_dir/toolchain-mips_24kc* tmp/stage-toolchain
+            make toolchain/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/toolchain-install.log" ||               make toolchain/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/toolchain-install-serial.log"
+            toolchain_gcc="$(find_gcc || true)"
+          fi
+          test -n "$toolchain_gcc"
+          "$toolchain_gcc" --version | head | tee "$STATE_DIR/toolchain-validation.txt"
+
+      - name: Save validated host tools and toolchain cache
+        if: ${{ inputs.prepare_toolchain_before_ssh && steps.toolchain-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.OPENWRT_DIR }}/staging_dir/host
+            ${{ env.OPENWRT_DIR }}/staging_dir/hostpkg
+            ${{ env.OPENWRT_DIR }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_DIR }}/build_dir/host
+            ${{ env.OPENWRT_DIR }}/build_dir/hostpkg
+            ${{ env.OPENWRT_DIR }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_DIR }}/tmp/stage-tools
+            ${{ env.OPENWRT_DIR }}/tmp/stage-toolchain
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Configure key-only OpenSSH
+        if: ${{ inputs.enable_ssh }}
+        shell: bash
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          ssh_user="$(id -un)"
+          ssh_group="$(id -gn)"
+          ssh_home="$(getent passwd "$ssh_user" | cut -d: -f6)"
+          echo "SSH_LOGIN_USER=$ssh_user" >> "$GITHUB_ENV"
+
+          key_file="$(mktemp)"
+          if [[ -n "${SSH_PUBLIC_KEY:-}" ]]; then
+            printf '%s\n' "$SSH_PUBLIC_KEY" > "$key_file"
+          else
+            curl --fail --location --retry 4 "https://github.com/${GITHUB_ACTOR}.keys" --output "$key_file"
+          fi
+
+          grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com) ' "$key_file"
+          sudo install -d -m 0700 -o "$ssh_user" -g "$ssh_group" "${ssh_home}/.ssh"
+          sudo install -m 0600 -o "$ssh_user" -g "$ssh_group" "$key_file" "${ssh_home}/.ssh/authorized_keys"
+          rm -f "$key_file"
+
+          sudo install -d -m 0755 /run/sshd
+          sudo ssh-keygen -A
+          sudo tee /etc/ssh/sshd_config.d/90-openwrt-action.conf >/dev/null <<SSHD
+          Port 22
+          ListenAddress 0.0.0.0
+          AddressFamily inet
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+          AllowAgentForwarding no
+          AllowTcpForwarding no
+          X11Forwarding no
+          ClientAliveInterval 30
+          ClientAliveCountMax 10
+          AllowUsers ${ssh_user}
+          SSHD
+          sudo /usr/sbin/sshd -t
+          sudo systemctl restart ssh
+
+      - name: Start OpenFrp TCP tunnel
+        if: ${{ inputs.enable_ssh }}
+        shell: bash
+        env:
+          OPENFRP_TOKEN: ${{ secrets.OPENFRP_TOKEN }}
+          OPENFRP_TUNNEL_ID: ${{ secrets.OPENFRP_TUNNEL_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${OPENFRP_TOKEN:-}" && -n "${OPENFRP_TUNNEL_ID:-}" ]]
+          endpoint='${{ inputs.openfrp_endpoint }}'
+          remote_port='${{ inputs.openfrp_remote_port }}'
+          [[ "$endpoint" != "replace-with-node-address" && "$remote_port" != "0" ]]
+
+          docker pull openfrp/frpc:latest
+          docker rm --force openfrp-ssh >/dev/null 2>&1 || true
+          docker run --detach --name openfrp-ssh --network host             openfrp/frpc:latest -u "$OPENFRP_TOKEN" -p "$OPENFRP_TUNNEL_ID"
+          sleep 8
+
+          {
+            echo "## OpenFrp SSH"
+            echo
+            echo '```bash'
+            echo "ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=6 -o IdentitiesOnly=yes -p ${remote_port} ${SSH_LOGIN_USER}@${endpoint}"
+            echo '```'
+            echo
+            echo "Finish with: \`sudo finish-porting\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for interactive porting to finish
+        if: ${{ inputs.enable_ssh }}
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          set -euo pipefail
+          while [[ ! -e /continue ]]; do
+            docker ps --format '{{.Names}}' | grep -Fxq openfrp-ssh || exit 1
+            sudo ss -lnt | grep -qE 'LISTEN.+:22[[:space:]]' || exit 1
+            sleep 15
+          done
+
+      - name: Stop OpenFrp and public SSH
+        if: ${{ always() && inputs.enable_ssh }}
+        shell: bash
+        run: |
+          set +e
+          docker logs openfrp-ssh > "$STATE_DIR/logs/openfrp-complete.log" 2>&1
+          docker rm --force openfrp-ssh
+          sudo systemctl stop ssh
+          sudo rm -f /continue
+
+      - name: Verify selected M31 source
+        if: ${{ inputs.build_after_ssh }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          make defconfig
+          grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config
+          test -f "target/linux/ath79/dts/${DTS_NAME}.dts"
+          grep -q '^define Device/embstar_m31$' target/linux/ath79/image/generic.mk
+          git diff --check
+          ./scripts/diffconfig.sh | tee "$STATE_DIR/config/pre-target-build.diffconfig"
+
+      - name: Compile target/linux and M31 DTB
+        id: target_build
+        if: ${{ inputs.build_after_ssh }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set +e
+          set -o pipefail
+          make target/linux/clean V=s 2>&1 | tee "$STATE_DIR/logs/target-linux-clean.log"
+          make target/linux/compile -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/target-linux-parallel.log"
+          rc=${PIPESTATUS[0]}
+
+          if [[ "$rc" -ne 0 ]]; then
+            make target/linux/compile -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/target-linux-serial.log"
+            rc=${PIPESTATUS[0]}
+          fi
+
+          if [[ "$rc" -eq 0 ]]; then
+            make target/linux/dtb -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/target-linux-dtb.log"
+            rc=${PIPESTATUS[0]}
+          fi
+
+          if [[ "$rc" -eq 0 ]]; then
+            dtb="$(find build_dir/target-mips_24kc_musl/linux-ath79_generic               -maxdepth 1 -type f -name "image-${DTS_NAME}.dtb" -print -quit)"
+            if [[ -z "$dtb" || ! -f "$dtb" ]]; then
+              rc=3
+            else
+              cp -a "$dtb" "$STATE_DIR/firmware/"
+              dtc -I dtb -O dts "$dtb" > "$STATE_DIR/firmware/${DTS_NAME}.compiled.dts"
+            fi
+          fi
+
+          echo "$rc" | tee "$STATE_DIR/target-build-exit-code.txt"
+          exit "$rc"
+
+      - name: Download remaining package sources
+        if: ${{ inputs.full_image_after_target && steps.target_build.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          find dl -type f -size -1024c -delete 2>/dev/null || true
+          make download -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/download.log"
+
+      - name: Build complete M31 firmware
+        id: full_build
+        if: ${{ inputs.full_image_after_target && steps.target_build.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set +e
+          set -o pipefail
+          make -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/full-build-parallel.log"
+          rc=${PIPESTATUS[0]}
+          if [[ "$rc" -ne 0 ]]; then
+            make -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/full-build-serial.log"
+            rc=${PIPESTATUS[0]}
+          fi
+          echo "$rc" | tee "$STATE_DIR/full-build-exit-code.txt"
+          exit "$rc"
+
+      - name: Verify and collect M31 firmware outputs
+        if: ${{ inputs.full_image_after_target && steps.full_build.outcome == 'success' }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          out="bin/targets/ath79/generic"
+          initramfs="$(find "$out" -maxdepth 1 -type f -name '*embstar_m31-initramfs-kernel.bin' -print -quit)"
+          sysupgrade="$(find "$out" -maxdepth 1 -type f -name '*embstar_m31-squashfs-sysupgrade.bin' -print -quit)"
+          manifest="$(find "$out" -maxdepth 1 -type f -name '*embstar_m31.manifest' -print -quit)"
+
+          test -n "$initramfs" && test -f "$initramfs"
+          test -n "$sysupgrade" && test -f "$sysupgrade"
+
+          cp -a "$initramfs" "$sysupgrade" "$STATE_DIR/firmware/"
+          [[ -n "$manifest" && -f "$manifest" ]] && cp -a "$manifest" "$STATE_DIR/firmware/"
+          find "$STATE_DIR/firmware" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort             | tee "$STATE_DIR/firmware/FILES.txt"
+          sha256sum "$STATE_DIR"/firmware/* > "$STATE_DIR/firmware/SHA256SUMS.txt" || true
+
+      - name: Export reusable M31 port state
+        if: ${{ always() }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STATE_DIR/source/individual-files" "$STATE_DIR/config" "$STATE_DIR/reuse/port/patches"
+
+          git status --short --branch | tee "$STATE_DIR/source/git-status.txt"
+          git diff --stat | tee "$STATE_DIR/source/git-diff-stat.txt"
+          git diff --check | tee "$STATE_DIR/source/git-diff-check.txt" || true
+
+          while IFS= read -r -d '' file; do
+            [[ "$file" == "PORTING-NOTES.txt" ]] && continue
+            git add -N -- "$file"
+          done < <(git ls-files -z --others --exclude-standard)
+
+          git diff --binary > "$STATE_DIR/source/m31-ath79-complete.patch"
+          cp "$STATE_DIR/source/m31-ath79-complete.patch"             "$STATE_DIR/reuse/port/patches/0001-m31-ath79-current.patch"
+
+          cp -a .config "$STATE_DIR/config/full.config" 2>/dev/null || true
+          ./scripts/diffconfig.sh > "$STATE_DIR/config/diffconfig.txt" 2>/dev/null || true
+          cp "$STATE_DIR/config/diffconfig.txt" "$STATE_DIR/reuse/port/config.seed" 2>/dev/null || true
+
+          cp -a "$EVIDENCE_DIR" "$STATE_DIR/evidence"
+          find bin/targets/ath79/generic -maxdepth 1 -type f -printf '%f\t%s bytes\n' 2>/dev/null | sort             > "$STATE_DIR/firmware-files.txt" || true
+          df -h > "$STATE_DIR/disk-usage.txt"
+
+      - name: Archive selected heavy build state
+        if: ${{ always() && inputs.save_heavy_build_state }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          heavy_paths=()
+          for path in staging_dir/host staging_dir/hostpkg staging_dir/toolchain-*             build_dir/host build_dir/hostpkg build_dir/toolchain-* tmp/stage-tools tmp/stage-toolchain; do
+            for match in $path; do
+              [[ -e "$match" ]] && heavy_paths+=("$match")
+            done
+          done
+          if (( ${#heavy_paths[@]} )); then
+            tar --zstd -cf "$STATE_DIR/heavy-build-state.tar.zst" "${heavy_paths[@]}"
+          fi
+
+      - name: Upload M31 migration state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: m31-port-state-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.STATE_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 6
+          retention-days: 21
+
+      - name: Upload built M31 firmware
+        if: ${{ always() && hashFiles('openwrt/bin/targets/ath79/generic/*embstar_m31*') != '' }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: m31-firmware-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.OPENWRT_DIR }}/bin/targets/ath79/generic/*embstar_m31*
+            ${{ env.STATE_DIR }}/firmware
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 21
+
+      - name: Write job summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "# Embstar M31-128M16 ath79 port run"
+            echo
+            echo "- OpenWrt ref: \`${{ inputs.openwrt_ref }}\`"
+            echo "- Target build outcome: \`${{ steps.target_build.outcome }}\`"
+            echo "- Full build outcome: \`${{ steps.full_build.outcome }}\`"
+            echo
+            echo "Download m31-port-state for logs and the tested exported patch."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail when requested target validation failed
+        if: ${{ always() && inputs.build_after_ssh && steps.target_build.outcome == 'failure' }}
+        shell: bash
+        run: exit 1
+
+      - name: Fail when requested full build failed
+        if: ${{ always() && inputs.full_image_after_target && steps.target_build.outcome == 'success' && steps.full_build.outcome == 'failure' }}
+        shell: bash
+        run: exit 1
