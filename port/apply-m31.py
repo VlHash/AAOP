@@ -13,13 +13,16 @@ for required in (generic_mk, network, dts):
         raise SystemExit(f"required OpenWrt file missing: {required}")
 
 device_block = """define Device/embstar_m31
+  $(Device/tplink-16mlzma)
   SOC := qca9531
   DEVICE_VENDOR := Embstar
   DEVICE_MODEL := M31
   DEVICE_VARIANT := 128M16
   DEVICE_PACKAGES := kmod-usb2 kmod-ath10k-ct-smallbuffers \\\n\tath10k-firmware-qca9887-ct
-  IMAGE_SIZE := 16000k
-  SUPPORTED_DEVICES += embstar
+  IMAGE_SIZE := 16192k
+  TPLINK_HWID := 0x3C00010B
+  IMAGES := sysupgrade.bin
+  SUPPORTED_DEVICES += oolite-v5.2 oolite-v5.2-dev
 endef
 TARGET_DEVICES += embstar_m31
 """
@@ -32,7 +35,12 @@ if "define Device/embstar_m31\n" not in text:
     generic_mk.write_text(text, encoding="utf-8")
     print("added Device/embstar_m31 to generic.mk")
 else:
-    print("Device/embstar_m31 already present")
+    start = text.index("define Device/embstar_m31\n")
+    end_marker = "TARGET_DEVICES += embstar_m31"
+    end = text.index(end_marker, start) + len(end_marker)
+    text = text[:start] + device_block.rstrip() + text[end:]
+    generic_mk.write_text(text, encoding="utf-8")
+    print("updated Device/embstar_m31 in generic.mk")
 
 network_block = """\tembstar,m31|\\
 \tembstar,qca9531)
