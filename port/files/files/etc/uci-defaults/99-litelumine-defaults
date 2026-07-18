@@ -1,0 +1,80 @@
+#!/bin/sh
+
+# LiteLumine Cellu-AR750S product defaults.
+# Keep the actual OpenWrt target as ath79/generic.
+
+uci -q set system.@system[0].hostname='LL-AR750S'
+
+# LAN: 192.168.165.1/24
+uci -q delete network.lan.ipaddr
+uci -q add_list network.lan.ipaddr='192.168.165.1/24'
+
+# Wi-Fi: enable all detected radios/AP interfaces and use one SSID on both bands.
+[ -s /etc/config/wireless ] || wifi config >/dev/null 2>&1
+
+for radio in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device$/\1/p"); do
+	uci -q set "wireless.${radio}.disabled=0"
+done
+
+for iface in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-iface$/\1/p"); do
+	uci -q set "wireless.${iface}.disabled=0"
+	uci -q set "wireless.${iface}.mode=ap"
+	uci -q set "wireless.${iface}.network=lan"
+	uci -q set "wireless.${iface}.ssid=LL-AR750S"
+	uci -q set "wireless.${iface}.encryption=none"
+done
+
+# LED triggers migrated from the old board behavior.
+for section in ll_system ll_wlan2g ll_wan ll_lan0 ll_lan1 ll_lan2 ll_lan3; do
+	uci -q delete "system.${section}"
+done
+
+uci -q set system.ll_system='led'
+uci -q set system.ll_system.name='SYSTEM'
+uci -q set system.ll_system.sysfs='red:system'
+uci -q set system.ll_system.trigger='heartbeat'
+
+uci -q set system.ll_wlan2g='led'
+uci -q set system.ll_wlan2g.name='WLAN 2.4G'
+uci -q set system.ll_wlan2g.sysfs='white:wlan2g'
+uci -q set system.ll_wlan2g.trigger='phy1tpt'
+
+uci -q set system.ll_wan='led'
+uci -q set system.ll_wan.name='WAN'
+uci -q set system.ll_wan.sysfs='green:wan'
+uci -q set system.ll_wan.trigger='netdev'
+uci -q set system.ll_wan.dev='eth1'
+uci -q add_list system.ll_wan.mode='link'
+uci -q add_list system.ll_wan.mode='tx'
+uci -q add_list system.ll_wan.mode='rx'
+
+# QCA9531 swconfig masks inherited from the historical Oolite topology.
+uci -q set system.ll_lan0='led'
+uci -q set system.ll_lan0.name='LAN1'
+uci -q set system.ll_lan0.sysfs='green:lan0'
+uci -q set system.ll_lan0.trigger='switch0'
+uci -q set system.ll_lan0.port_mask='0x10'
+
+uci -q set system.ll_lan1='led'
+uci -q set system.ll_lan1.name='LAN2'
+uci -q set system.ll_lan1.sysfs='green:lan1'
+uci -q set system.ll_lan1.trigger='switch0'
+uci -q set system.ll_lan1.port_mask='0x08'
+
+uci -q set system.ll_lan2='led'
+uci -q set system.ll_lan2.name='LAN3'
+uci -q set system.ll_lan2.sysfs='green:lan2'
+uci -q set system.ll_lan2.trigger='switch0'
+uci -q set system.ll_lan2.port_mask='0x04'
+
+uci -q set system.ll_lan3='led'
+uci -q set system.ll_lan3.name='LAN4'
+uci -q set system.ll_lan3.sysfs='green:lan3'
+uci -q set system.ll_lan3.trigger='switch0'
+uci -q set system.ll_lan3.port_mask='0x02'
+
+uci -q commit system
+uci -q commit network
+uci -q commit wireless
+
+exit 0

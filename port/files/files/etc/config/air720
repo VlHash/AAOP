@@ -1,0 +1,4 @@
+config air720 'main'
+	option apn ''
+	option at_port ''
+	option ppp_port ''

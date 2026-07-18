@@ -1,0 +1,26 @@
+#!/bin/sh
+
+APN="$(uci -q get air720.main.apn || true)"
+
+if [ -n "$APN" ]; then
+	exec chat -s -v \
+		ABORT 'BUSY' \
+		ABORT 'NO CARRIER' \
+		ABORT 'ERROR' \
+		TIMEOUT 15 \
+		'' 'AT' \
+		'OK' 'ATE0' \
+		'OK' "AT+CGDCONT=1,\"IP\",\"$APN\"" \
+		'OK' 'ATD*99#' \
+		'CONNECT' ''
+else
+	exec chat -s -v \
+		ABORT 'BUSY' \
+		ABORT 'NO CARRIER' \
+		ABORT 'ERROR' \
+		TIMEOUT 15 \
+		'' 'AT' \
+		'OK' 'ATE0' \
+		'OK' 'ATD*99#' \
+		'CONNECT' ''
+fi

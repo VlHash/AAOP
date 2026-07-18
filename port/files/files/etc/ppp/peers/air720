@@ -1,0 +1,28 @@
+# Air720SL PPP fallback profile.
+# The serial device and speed are supplied by /usr/bin/air720-ppp.
+
+noauth
+noipdefault
+usepeerdns
+defaultroute
+persist
+holdoff 5
+maxfail 0
+
+novj
+novjccomp
+noccp
+ipcp-accept-local
+ipcp-accept-remote
+local
+nocrtscts
+
+hide-password
+lock
+modem
+
+pidfile /var/run/air720-ppp.pid
+ipparam air720
+
+connect '/usr/libexec/air720-chat-connect'
+disconnect '/usr/libexec/air720-chat-disconnect'

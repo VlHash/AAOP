@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set -eu
+
+configured="$(uci -q get air720.main.at_port || true)"
+port="${1:-$configured}"
+
+if [ -z "$port" ]; then
+	for candidate in /dev/ttyUSB2 /dev/ttyUSB1 /dev/ttyUSB3 /dev/ttyUSB0; do
+		if [ -c "$candidate" ]; then
+			port="$candidate"
+			break
+		fi
+	done
+fi
+
+if [ -z "$port" ] || [ ! -c "$port" ]; then
+	echo "No Air720 AT serial port found."
+	echo "Try: air720-bind"
+	echo "Then set the confirmed port, for example:"
+	echo "  uci set air720.main.at_port='/dev/ttyUSB2'; uci commit air720"
+	exit 1
+fi
+
+echo "Opening Air720 AT terminal on $port at 115200 baud"
+echo "Exit picocom with Ctrl-A then Ctrl-X"
+exec picocom -b 115200 "$port"

@@ -12,17 +12,21 @@ for required in (generic_mk, network, dts):
     if not required.exists():
         raise SystemExit(f"required OpenWrt file missing: {required}")
 
+# Keep the already validated internal Device ID and TP-Link/Oolite image ABI.
+# Product branding is changed only at the presentation/profile level.
 device_block = """define Device/embstar_m31
   $(Device/tplink-16mlzma)
   SOC := qca9531
-  DEVICE_VENDOR := Embstar
-  DEVICE_MODEL := M31
-  DEVICE_VARIANT := 128M16
-  DEVICE_PACKAGES := kmod-usb2 kmod-ath10k-ct-smallbuffers \\\n\tath10k-firmware-qca9887-ct
+  DEVICE_VENDOR := LiteLumine
+  DEVICE_MODEL := Cellu-AR750S
+  DEVICE_PACKAGES := kmod-usb2 \\
+\tkmod-usb-net-rndis kmod-usb-net-cdc-ether \\
+\tkmod-usb-serial kmod-usb-serial-wwan kmod-usb-serial-option \\
+\tkmod-ath10k-ct-smallbuffers ath10k-firmware-qca9887-ct
   IMAGE_SIZE := 16192k
   TPLINK_HWID := 0x3C00010B
   IMAGES := sysupgrade.bin
-  SUPPORTED_DEVICES += oolite-v5.2 oolite-v5.2-dev
+  SUPPORTED_DEVICES += embstar,m31 oolite-v5.2 oolite-v5.2-dev
 endef
 TARGET_DEVICES += embstar_m31
 """
@@ -32,20 +36,20 @@ if "define Device/embstar_m31\n" not in text:
     if not text.endswith("\n"):
         text += "\n"
     text += "\n" + device_block
-    generic_mk.write_text(text, encoding="utf-8")
-    print("added Device/embstar_m31 to generic.mk")
 else:
     start = text.index("define Device/embstar_m31\n")
     end_marker = "TARGET_DEVICES += embstar_m31"
     end = text.index(end_marker, start) + len(end_marker)
     text = text[:start] + device_block.rstrip() + text[end:]
-    generic_mk.write_text(text, encoding="utf-8")
-    print("updated Device/embstar_m31 in generic.mk")
+
+generic_mk.write_text(text, encoding="utf-8")
+print("Device/embstar_m31 profile installed/updated")
 
 network_block = """\tembstar,m31|\\
 \tembstar,qca9531)
 \t\tucidef_set_interface_wan "eth1"
-\t\tucidef_add_switch "switch0" \\\n\t\t\t"0@eth0" "1:lan:4" "2:lan:3" "3:lan:2" "4:lan:1"
+\t\tucidef_add_switch "switch0" \\
+\t\t\t"0@eth0" "1:lan:4" "2:lan:3" "3:lan:2" "4:lan:1"
 \t\t;;
 """
 
@@ -53,11 +57,10 @@ text = network.read_text(encoding="utf-8")
 if "embstar,m31|\\" not in text:
     marker = "\tengenius,eap300-v2)"
     pos = text.find(marker)
-    if pos >= 0:
-        text = text[:pos] + network_block + text[pos:]
-        network.write_text(text, encoding="utf-8")
-        print("added Embstar M31 network defaults")
-    else:
-        print("WARNING: network insertion marker not found; skipping 02_network edit")
+    if pos < 0:
+        raise SystemExit("02_network insertion marker not found")
+    text = text[:pos] + network_block + text[pos:]
+    network.write_text(text, encoding="utf-8")
+    print("M31 network defaults added")
 else:
-    print("Embstar M31 network defaults already present")
+    print("M31 network defaults already present")

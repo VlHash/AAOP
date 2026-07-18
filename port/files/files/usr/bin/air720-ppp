@@ -1,0 +1,58 @@
+#!/bin/sh
+
+set -eu
+
+action="${1:-start}"
+
+find_port() {
+	configured="$(uci -q get air720.main.ppp_port || true)"
+	if [ -n "$configured" ] && [ -c "$configured" ]; then
+		echo "$configured"
+		return 0
+	fi
+
+	for candidate in /dev/ttyUSB3 /dev/ttyUSB2 /dev/ttyUSB1 /dev/ttyUSB0; do
+		if [ -c "$candidate" ]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+case "$action" in
+	start)
+		port="$(find_port || true)"
+		if [ -z "$port" ]; then
+			echo "No Air720 MODEM serial port found."
+			echo "RNDIS is the recommended primary mode."
+			echo "For PPP fallback, run air720-bind and configure:"
+			echo "  uci set air720.main.ppp_port='/dev/ttyUSB3'; uci commit air720"
+			exit 1
+		fi
+
+		echo "Starting Air720 PPP fallback on $port"
+		exec pppd "$port" 115200 call air720
+		;;
+	stop)
+		if [ -r /var/run/air720-ppp.pid ]; then
+			kill "$(cat /var/run/air720-ppp.pid)" 2>/dev/null || true
+			rm -f /var/run/air720-ppp.pid
+		else
+			killall pppd 2>/dev/null || true
+		fi
+		;;
+	status)
+		if [ -r /var/run/air720-ppp.pid ] && kill -0 "$(cat /var/run/air720-ppp.pid)" 2>/dev/null; then
+			echo "Air720 PPP is running, pid $(cat /var/run/air720-ppp.pid)"
+		else
+			echo "Air720 PPP is not running"
+			exit 1
+		fi
+		;;
+	*)
+		echo "Usage: air720-ppp {start|stop|status}"
+		exit 2
+		;;
+esac

@@ -6,7 +6,7 @@
 #include <dt-bindings/input/input.h>
 
 / {
-	model = "Embstar M31-128M16";
+	model = "LiteLumine Cellu-AR750S";
 	compatible = "embstar,m31", "embstar,qca9531", "qca,qca9531";
 
 	aliases {

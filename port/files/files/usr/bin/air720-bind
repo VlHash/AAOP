@@ -1,0 +1,53 @@
+#!/bin/sh
+
+set -eu
+
+find_usb_ids() {
+	for net in /sys/class/net/*; do
+		[ -e "$net/device/driver" ] || continue
+		driver="$(basename "$(readlink -f "$net/device/driver")")"
+		case "$driver" in
+			rndis_host|cdc_ether) ;;
+			*) continue ;;
+		esac
+
+		p="$(readlink -f "$net/device")"
+		while [ "$p" != "/" ] && [ -n "$p" ]; do
+			if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+				printf '%s %s\n' "$(cat "$p/idVendor")" "$(cat "$p/idProduct")"
+				return 0
+			fi
+			p="${p%/*}"
+			[ -n "$p" ] || p="/"
+		done
+	done
+	return 1
+}
+
+modprobe option 2>/dev/null || true
+
+ids="$(find_usb_ids || true)"
+if [ -z "$ids" ]; then
+	echo "No RNDIS/ECM USB parent found. Pass VID PID manually:"
+	echo "  air720-bind 1234 5678"
+	exit 1
+fi
+
+vid="${1:-$(echo "$ids" | awk '{print $1}')}"
+pid="${2:-$(echo "$ids" | awk '{print $2}')}"
+
+new_id=/sys/bus/usb-serial/drivers/option1/new_id
+if [ ! -w "$new_id" ]; then
+	echo "option1 new_id is unavailable: $new_id"
+	exit 1
+fi
+
+echo "Binding unclaimed USB serial interfaces for VID:PID ${vid}:${pid}"
+echo "$vid $pid" > "$new_id" 2>/dev/null || true
+sleep 1
+
+ls -l /dev/ttyUSB* 2>/dev/null || {
+	echo "No ttyUSB node appeared."
+	echo "The modem may need a kernel interface blacklist/quirk for its exact USB descriptor."
+	exit 2
+}
