@@ -1,15 +1,39 @@
 #!/bin/sh
+set -u
+
+LOCKDIR=/var/lock/air720-modem-control.lock
+release_lock() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
+
+acquire_lock() {
+	mkdir -p /var/lock
+	count=0
+	while [ "$count" -lt 60 ]; do
+		if mkdir "$LOCKDIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$LOCKDIR/pid"
+			trap release_lock EXIT
+			trap 'release_lock; exit 1' HUP INT TERM
+			return 0
+		fi
+		oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+		if [ -n "$oldpid" ] && ! kill -0 "$oldpid" 2>/dev/null; then
+			rm -rf "$LOCKDIR" 2>/dev/null || true
+			continue
+		fi
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
+acquire_lock || exit 1
 
 APN="${USE_APN:-$(uci -q get air720.main.apn || true)}"
 DIAL="${DIALNUMBER:-$(uci -q get air720.main.dialnumber || true)}"
 [ -n "$DIAL" ] || DIAL='*99#'
 
 if [ -n "$APN" ]; then
-	exec /usr/sbin/chat -s -v \
-		ABORT 'BUSY' \
-		ABORT 'NO CARRIER' \
-		ABORT 'NO DIALTONE' \
-		ABORT 'ERROR' \
+	/usr/sbin/chat -s -v \
+		ABORT 'BUSY' ABORT 'NO CARRIER' ABORT 'NO DIALTONE' ABORT 'ERROR' \
 		TIMEOUT 30 \
 		'' 'AT' \
 		'OK' 'ATE0' \
@@ -18,11 +42,8 @@ if [ -n "$APN" ]; then
 		'OK' "ATD$DIAL" \
 		'CONNECT' ''
 else
-	exec /usr/sbin/chat -s -v \
-		ABORT 'BUSY' \
-		ABORT 'NO CARRIER' \
-		ABORT 'NO DIALTONE' \
-		ABORT 'ERROR' \
+	/usr/sbin/chat -s -v \
+		ABORT 'BUSY' ABORT 'NO CARRIER' ABORT 'NO DIALTONE' ABORT 'ERROR' \
 		TIMEOUT 30 \
 		'' 'AT' \
 		'OK' 'ATE0' \

@@ -2,27 +2,17 @@
 
 VID="${AIR720_VID:-1286}"
 PID="${AIR720_PID:-4e3d}"
-
 mode="$(uci -q get air720.main.mode || echo hybrid)"
-case "$mode" in
-	hybrid|ppp) ;;
-	*) exit 0 ;;
-esac
+case "$mode" in hybrid|ppp) ;; *) exit 0 ;; esac
 
 devname="${DEVNAME:-${DEVICENAME:-${DEVPATH##*/}}}"
 [ -n "$devname" ] || exit 0
-case "$devname" in
-	/dev/*) dev="$devname" ;;
-	*) dev="/dev/$devname" ;;
-esac
+case "$devname" in /dev/*) dev="$devname" ;; *) dev="/dev/$devname" ;; esac
 
 case "${ACTION:-}" in
 	remove)
 		configured="$(uci -q get air720.main.ppp_port || true)"
-		if [ "$configured" = "$dev" ]; then
-			ifdown cellular >/dev/null 2>&1 || true
-			logger -t air720-hotplug "PPP tty removed: $dev" 2>/dev/null || true
-		fi
+		[ "$configured" = "$dev" ] && ifdown cellular >/dev/null 2>&1 || true
 		exit 0
 		;;
 	add) ;;
@@ -30,7 +20,6 @@ case "${ACTION:-}" in
 esac
 
 [ -c "$dev" ] || exit 0
-
 tty="${dev##*/}"
 p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
 ifnum=''
@@ -44,22 +33,17 @@ while [ -n "$p" ] && [ "$p" != / ]; do
 		[ "$vid" = "$VID" ] && [ "$pid" = "$PID" ] && match=1
 		break
 	fi
-	p="${p%/*}"
-	[ -n "$p" ] || p=/
+	p="${p%/*}"; [ -n "$p" ] || p=/
 done
 
 [ "$match" -eq 1 ] || exit 0
-case "$ifnum" in
-	03|3) ;;
-	*) exit 0 ;;
-esac
+case "$ifnum" in 03|3) ;; *) exit 0 ;; esac
 
 (
-	# Give option/usb_wwan and netifd a moment to settle after the tty uevent.
 	sleep 1
-	logger -t air720-hotplug "PPP USB interface 03 appeared as $dev; starting native PPP" 2>/dev/null || true
-	/usr/bin/air720-ppp start >/tmp/air720-ppp-tty-hotplug.log 2>&1 || \
-		logger -t air720-hotplug "PPP start failed after tty hotplug: $dev" 2>/dev/null || true
+	case "$mode" in
+		hybrid) /usr/bin/air720-control recover >/tmp/air720-control-tty-hotplug.log 2>&1 || true ;;
+		ppp) /usr/bin/air720-ppp start >/tmp/air720-ppp-tty-hotplug.log 2>&1 || true ;;
+	esac
 ) &
-
 exit 0

@@ -1,12 +1,6 @@
 #!/bin/sh
 
-# Expose the native PPP interface to netifd/LuCI during first boot even when
-# USB serial enumeration has not completed yet. The init service and tty
-# hotplug hook will bind USB interface 03 and enable dialing later.
-if [ -x /usr/bin/air720-ppp ]; then
-	/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare-firstboot.log 2>&1 || true
-fi
-
+/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare-firstboot.log 2>&1 || true
 /etc/init.d/air720 enable
 /etc/init.d/air720 start >/dev/null 2>&1 &
 exit 0

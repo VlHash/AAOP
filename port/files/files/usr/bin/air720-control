@@ -1,0 +1,231 @@
+#!/bin/sh
+set -u
+
+action="${1:-status}"
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
+LOCKDIR=/var/lock/air720-control.lock
+STATEFILE=/tmp/air720-control.state
+
+log() { logger -t air720-control "$*" 2>/dev/null || true; }
+set_state() { printf '%s\n' "$1" > "$STATEFILE"; log "state=$1"; }
+release_lock() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
+
+acquire_lock() {
+	mkdir -p /var/lock
+	if ! mkdir "$LOCKDIR" 2>/dev/null; then
+		oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+		if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then return 1; fi
+		rm -rf "$LOCKDIR" 2>/dev/null || true
+		mkdir "$LOCKDIR" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCKDIR/pid"
+	trap release_lock EXIT
+	trap 'release_lock; exit 1' HUP INT TERM
+}
+
+iface_up() {
+	ubus call "network.interface.$1" status 2>/dev/null | grep -Eq '"up"[[:space:]]*:[[:space:]]*true'
+}
+
+wait_iface_up() {
+	name="$1"; timeout="$2"; count=0
+	while [ "$count" -lt "$timeout" ]; do
+		iface_up "$name" && return 0
+		count=$((count + 1)); sleep 1
+	done
+	return 1
+}
+
+wait_pppd_gone() {
+	count=0
+	while [ "$count" -lt 15 ]; do
+		found=0
+		for proc in /proc/[0-9]*; do
+			[ -r "$proc/cmdline" ] || continue
+			cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+			case "$cmd" in *"ipparam cellular"*) found=1; break ;; esac
+		done
+		[ "$found" -eq 0 ] && return 0
+		count=$((count + 1)); sleep 1
+	done
+	return 1
+}
+
+kill_stale_cellular_pppd() {
+	for proc in /proc/[0-9]*; do
+		[ -r "$proc/cmdline" ] || continue
+		cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+		case "$cmd" in
+			*"ipparam cellular"*) kill -TERM "${proc##*/}" 2>/dev/null || true ;;
+		esac
+	done
+	sleep 2
+}
+
+air720_ifnum() {
+	[ -c "$1" ] || return 1
+	tty="${1##*/}"
+	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
+	ifnum=''
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
+			printf '%s\n' "$ifnum"; return 0
+		fi
+		p="${p%/*}"; [ -n "$p" ] || p=/
+	done
+	return 1
+}
+
+find_at_port() {
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
+		case "$ifnum" in 02|2) echo "$candidate"; return 0 ;; esac
+	done
+	return 1
+}
+
+usb_present() {
+	for dev in /sys/bus/usb/devices/*; do
+		[ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ] || continue
+		vid="$(tr 'A-F' 'a-f' < "$dev/idVendor")"
+		pid="$(tr 'A-F' 'a-f' < "$dev/idProduct")"
+		[ "$vid" = "$VID" ] && [ "$pid" = "$PID" ] && return 0
+	done
+	return 1
+}
+
+wait_usb_absent() {
+	count=0
+	while [ "$count" -lt 20 ]; do
+		usb_present || return 0
+		count=$((count + 1)); sleep 1
+	done
+	return 1
+}
+
+wait_usb_present() {
+	count=0
+	while [ "$count" -lt 90 ]; do
+		usb_present && return 0
+		count=$((count + 1)); sleep 1
+	done
+	return 1
+}
+
+start_serialized() {
+	set_state ppp-connecting
+	/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare.log 2>&1 || true
+	/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 || true
+
+	ppp_ok=0
+	if wait_iface_up cellular 60; then
+		ppp_ok=1
+		set_state ppp-up
+	else
+		set_state ppp-failed
+	fi
+
+	# CID5 starts only after the PPP attempt completes.
+	set_state ipv6-connecting
+	/usr/bin/air720-rndis6 start >/tmp/air720-rndis6.log 2>&1 || true
+
+	v6_ok=0
+	if wait_iface_up cellular6 60; then v6_ok=1; fi
+
+	if [ "$ppp_ok" -eq 1 ] && [ "$v6_ok" -eq 1 ]; then
+		set_state online
+		return 0
+	fi
+	set_state partial
+	return 1
+}
+
+redial_ppp() {
+	set_state redialing
+	ifdown cellular >/dev/null 2>&1 || true
+	wait_pppd_gone || kill_stale_cellular_pppd
+	/usr/bin/air720-ppp start >/tmp/air720-ppp-redial.log 2>&1 || true
+	wait_iface_up cellular 60 && { set_state online; return 0; }
+	set_state ppp-failed
+	return 1
+}
+
+reconnect_ipv6() {
+	set_state ipv6-reconnecting
+	/usr/bin/air720-rndis6 restart >/tmp/air720-rndis6-reconnect.log 2>&1 || true
+	wait_iface_up cellular6 60 && { set_state online; return 0; }
+	set_state ipv6-failed
+	return 1
+}
+
+software_reset() {
+	set_state reset-stopping-links
+
+	# Stop PPP retry activity before AT+CFUN=1,1.
+	uci -q set network.cellular.auto='0'
+	uci -q commit network
+	ubus call network reload >/dev/null 2>&1 || true
+	ifdown cellular >/dev/null 2>&1 || true
+	ifdown cellular6 >/dev/null 2>&1 || true
+	wait_pppd_gone || kill_stale_cellular_pppd
+	sleep 2
+
+	at_port="$(find_at_port || true)"
+	if [ -z "$at_port" ]; then
+		set_state reset-no-at-port
+		return 1
+	fi
+
+	set_state resetting-modem
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port"
+	/usr/sbin/chat -t 12 -s -v \
+		ABORT 'ERROR' \
+		'' 'AT' \
+		'OK' 'AT+CFUN=1,1' \
+		'OK' <&3 >&3 || true
+	exec 3>&-
+
+	set_state waiting-usb-reset
+	wait_usb_absent || true
+	wait_usb_present || { set_state reset-usb-timeout; return 1; }
+	sleep 3
+
+	set_state reset-recovering
+	start_serialized
+}
+
+case "$action" in
+	start|recover)
+		acquire_lock || exit 0
+		start_serialized
+		;;
+	redial)
+		acquire_lock || exit 1
+		redial_ppp
+		;;
+	reconnect6)
+		acquire_lock || exit 1
+		reconnect_ipv6
+		;;
+	reset)
+		acquire_lock || exit 1
+		software_reset
+		;;
+	status)
+		printf 'state=%s\n' "$(cat "$STATEFILE" 2>/dev/null || echo idle)"
+		printf 'busy=%s\n' "$([ -d "$LOCKDIR" ] && echo 1 || echo 0)"
+		printf 'usb=%s\n' "$(usb_present && echo 1 || echo 0)"
+		printf 'cellular=%s\n' "$(iface_up cellular && echo up || echo down)"
+		printf 'cellular6=%s\n' "$(iface_up cellular6 && echo up || echo down)"
+		;;
+	*)
+		echo "Usage: air720-control {start|recover|redial|reconnect6|reset|status}" >&2
+		exit 2
+		;;
+esac

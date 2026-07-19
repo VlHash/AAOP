@@ -16,12 +16,8 @@ esac
 [ -e "/sys/class/net/$INTERFACE/device/driver" ] || exit 0
 
 driver="$(basename "$(readlink -f "/sys/class/net/$INTERFACE/device/driver")")"
-case "$driver" in
-	rndis_host|cdc_ether) ;;
-	*) exit 0 ;;
-esac
+case "$driver" in rndis_host|cdc_ether) ;; *) exit 0 ;; esac
 
-# Restrict this hook to the Luat Air720S/SL USB device 1286:4e3d.
 p="$(readlink -f "/sys/class/net/$INTERFACE/device")"
 match=0
 while [ -n "$p" ] && [ "$p" != / ]; do
@@ -31,33 +27,16 @@ while [ -n "$p" ] && [ "$p" != / ]; do
 		[ "$vid" = 1286 ] && [ "$pid" = 4e3d ] && match=1
 		break
 	fi
-	p="${p%/*}"
-	[ -n "$p" ] || p=/
+	p="${p%/*}"; [ -n "$p" ] || p=/
 done
 [ "$match" -eq 1 ] || exit 0
 
-# Recover the two data planes independently. PPP recovery must not depend on
-# whether CID5/RNDIS IPv6 succeeds, and vice versa.
+mode="$(uci -q get air720.main.mode || echo hybrid)"
 (
-	mode="$(uci -q get air720.main.mode || echo hybrid)"
-
+	sleep 1
 	case "$mode" in
-		hybrid|rndis6)
-			/usr/bin/air720-rndis6 start "$INTERFACE" >/tmp/air720-rndis6-hotplug.log 2>&1 || \
-				logger -t air720-hotplug \
-					"RNDIS/ECM IPv6 recovery failed after USB network re-enumeration" \
-					2>/dev/null || true
-			;;
-	esac
-
-	case "$mode" in
-		hybrid)
-			/usr/bin/air720-ppp start >>/tmp/air720-ppp-hotplug.log 2>&1 || \
-				logger -t air720-hotplug \
-					"PPP IPv4 recovery failed after Air720SL USB network re-enumeration" \
-					2>/dev/null || true
-			;;
+		hybrid) /usr/bin/air720-control recover >/tmp/air720-control-net-hotplug.log 2>&1 || true ;;
+		rndis6) /usr/bin/air720-rndis6 start "$INTERFACE" >/tmp/air720-rndis6-hotplug.log 2>&1 || true ;;
 	esac
 ) &
-
 exit 0

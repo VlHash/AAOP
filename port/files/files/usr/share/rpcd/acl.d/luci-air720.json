@@ -1,0 +1,15 @@
+{
+	"luci-air720": {
+		"description": "Grant access to Air720SL cellular status and control",
+		"read": {
+			"ubus": {
+				"air720": [ "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"air720": [ "action" ]
+			}
+		}
+	}
+}

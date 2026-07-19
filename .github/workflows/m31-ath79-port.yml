@@ -259,6 +259,10 @@ jobs:
               "files/usr/bin/air720-rndis6"
               "files/usr/libexec/air720-chat-connect"
               "$AIR720_KERNEL_PATCH"
+              "files/usr/bin/air720-control"
+              "files/usr/share/rpcd/ucode/air720"
+              "files/usr/share/rpcd/acl.d/luci-air720.json"
+              "files/www/luci-static/resources/view/status/include/90_air720.js"
             )
             for rel in "${air720_paths[@]}"; do
               rm -rf "$OPENWRT_DIR/$rel"
@@ -299,6 +303,7 @@ jobs:
               "files/usr/bin/air720-ppp"
               "files/usr/bin/air720-rndis6"
               "files/usr/libexec/air720-chat-connect"
+              "files/usr/bin/air720-control"
             )
             for rel in "${air720_exec_paths[@]}"; do
               test -f "$OPENWRT_DIR/$rel"
@@ -385,6 +390,7 @@ jobs:
               CONFIG_PACKAGE_ppp
               CONFIG_PACKAGE_chat
               CONFIG_PACKAGE_odhcpd-ipv6only
+              CONFIG_PACKAGE_rpcd-mod-ucode
             )
           fi
 
@@ -752,6 +758,7 @@ jobs:
               ppp
               chat
               odhcpd-ipv6only
+              rpcd-mod-ucode
             )
           fi
 
@@ -781,6 +788,10 @@ jobs:
             test -x "$rootfs/etc/init.d/air720"
             test -x "$rootfs/etc/uci-defaults/99-air720"
             test -x "$rootfs/etc/hotplug.d/net/95-air720-rndis"
+            test -x "$rootfs/usr/bin/air720-control"
+            test -f "$rootfs/usr/share/rpcd/ucode/air720"
+            test -f "$rootfs/usr/share/rpcd/acl.d/luci-air720.json"
+            test -f "$rootfs/www/luci-static/resources/view/status/include/90_air720.js"
             test -x "$rootfs/etc/hotplug.d/tty/95-air720-ppp"
             test -x "$rootfs/usr/bin/air720-at"
             test -x "$rootfs/usr/bin/air720-bind"
@@ -790,6 +801,14 @@ jobs:
             test -x "$rootfs/usr/libexec/air720-chat-connect"
             grep -q "proto='ppp'" "$rootfs/usr/bin/air720-ppp"
             grep -q "pppname='air720-cellular'" "$rootfs/usr/bin/air720-ppp"
+            grep -q "air720-modem-control.lock" "$rootfs/usr/libexec/air720-chat-connect"
+            grep -q "air720-modem-control.lock" "$rootfs/usr/bin/air720-rndis6"
+            grep -q "AT+CFUN=1,1" "$rootfs/usr/bin/air720-control"
+            grep -q "air720-control start" "$rootfs/etc/init.d/air720"
+            grep -q "air720-control recover" "$rootfs/etc/hotplug.d/tty/95-air720-ppp"
+            grep -q "air720-control recover" "$rootfs/etc/hotplug.d/net/95-air720-rndis"
+            grep -q "return { air720: methods };" "$rootfs/usr/share/rpcd/ucode/air720"
+            grep -q "object: 'air720'" "$rootfs/www/luci-static/resources/view/status/include/90_air720.js"
             grep -q "noipv6 115200" "$rootfs/usr/bin/air720-ppp"
             grep -q "prepare)" "$rootfs/usr/bin/air720-ppp"
             grep -Fq "uci -q delete network.cellular.apn || true" "$rootfs/usr/bin/air720-ppp"

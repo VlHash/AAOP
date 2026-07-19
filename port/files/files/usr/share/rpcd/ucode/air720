@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+'use strict';
+
+import { access, dirname, glob, readfile } from 'fs';
+import { connect } from 'ubus';
+
+function modem_present() {
+	for (let path in glob('/sys/bus/usb/devices/*/idVendor')) {
+		let base = dirname(path);
+		let vid = trim(readfile(path) || '');
+		let pid = trim(readfile(`${base}/idProduct`) || '');
+		if (lc(vid) == '1286' && lc(pid) == '4e3d')
+			return true;
+	}
+	return false;
+}
+
+function iface_status(ubus, name) {
+	return ubus.call(`network.interface.${name}`, 'status') || {};
+}
+
+function first_address(status, family) {
+	let list = status?.[family];
+	if (type(list) == 'array' && length(list))
+		return list[0]?.address || '';
+	return '';
+}
+
+const methods = {
+	status: {
+		call: function() {
+			const ubus = connect();
+			const v4 = iface_status(ubus, 'cellular');
+			const v6 = iface_status(ubus, 'cellular6');
+			const state_text = readfile('/tmp/air720-control.state');
+
+			return {
+				modem_present: modem_present(),
+				busy: access('/var/lock/air720-control.lock') == true,
+				state: state_text ? trim(state_text) : 'idle',
+				ipv4_up: v4?.up == true,
+				ipv4_address: first_address(v4, 'ipv4-address'),
+				ipv6_up: v6?.up == true,
+				ipv6_address: first_address(v6, 'ipv6-address')
+			};
+		}
+	},
+
+	action: {
+		args: { action: '' },
+		call: function(request) {
+			let action = request.args.action;
+			switch (action) {
+			case 'redial':
+			case 'reconnect6':
+			case 'reset':
+				break;
+			default:
+				return { accepted: false, error: 'Unsupported Air720 action' };
+			}
+
+			let rc = system(`/usr/bin/air720-control ${action} >/tmp/air720-control-rpc.log 2>&1 &`);
+			return { accepted: rc == 0, action };
+		}
+	}
+};
+
+return { air720: methods };
