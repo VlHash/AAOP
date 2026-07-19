@@ -1,8 +1,8 @@
 #!/bin/sh
 
-[ -n "$INTERFACE" ] || exit 0
+[ -n "${INTERFACE:-}" ] || exit 0
 
-case "$ACTION" in
+case "${ACTION:-}" in
 	remove)
 		configured="$(uci -q get air720.main.rndis_device || true)"
 		[ "$configured" = "$INTERFACE" ] && ifdown cellular6 >/dev/null 2>&1 || true
@@ -36,32 +36,28 @@ while [ -n "$p" ] && [ "$p" != / ]; do
 done
 [ "$match" -eq 1 ] || exit 0
 
-# The RNDIS/ECM netdev reappearing is the reliable userspace signal that the
-# Air720SL composite USB device has enumerated again after a modem reset.
-#
-# Recover CID5/RNDIS IPv6 first. In hybrid mode, then re-run the native PPP
-# helper as well: it re-discovers USB interface 03, refreshes network.cellular,
-# and invokes netifd's native proto ppp path, whose connect script recreates
-# CID1 as IP and dials *99#. This makes a manual Air720SL reset self-recovering
-# without requiring a GPIO reset line on the M31 host.
+# Recover the two data planes independently. PPP recovery must not depend on
+# whether CID5/RNDIS IPv6 succeeds, and vice versa.
 (
-	/usr/bin/air720-rndis6 start "$INTERFACE" >/tmp/air720-rndis6-hotplug.log 2>&1
-	rc=$?
+	mode="$(uci -q get air720.main.mode || echo hybrid)"
 
-	if [ "$rc" -eq 0 ]; then
-		mode="$(uci -q get air720.main.mode || echo hybrid)"
-		case "$mode" in
-			hybrid)
+	case "$mode" in
+		hybrid|rndis6)
+			/usr/bin/air720-rndis6 start "$INTERFACE" >/tmp/air720-rndis6-hotplug.log 2>&1 || \
 				logger -t air720-hotplug \
-					"Air720SL USB network function re-added; restoring native PPP IPv4" \
+					"RNDIS/ECM IPv6 recovery failed after USB network re-enumeration" \
 					2>/dev/null || true
-				/usr/bin/air720-ppp start >>/tmp/air720-ppp-hotplug.log 2>&1 || \
-					logger -t air720-hotplug \
-						"PPP IPv4 recovery failed after Air720SL USB re-enumeration" \
-						2>/dev/null || true
-				;;
-		esac
-	fi
+			;;
+	esac
+
+	case "$mode" in
+		hybrid)
+			/usr/bin/air720-ppp start >>/tmp/air720-ppp-hotplug.log 2>&1 || \
+				logger -t air720-hotplug \
+					"PPP IPv4 recovery failed after Air720SL USB network re-enumeration" \
+					2>/dev/null || true
+			;;
+	esac
 ) &
 
 exit 0

@@ -189,12 +189,13 @@ configure_relay() {
 
 	# The Air720 RNDIS bearer exposes an on-link /64 but no delegated prefix in the
 	# validated deployment. Relay RA/DHCPv6/NDP so LAN hosts can use that same /64.
-	uci -q delete network.lan.ip6assign
+	# These deletes are idempotent under set -e.
+	uci -q delete network.lan.ip6assign || true
 	uci -q set dhcp.lan.ra='relay'
 	uci -q set dhcp.lan.dhcpv6='relay'
 	uci -q set dhcp.lan.ndp='relay'
 
-	uci -q delete dhcp.cellular6
+	uci -q delete dhcp.cellular6 || true
 	uci -q set dhcp.cellular6='dhcp'
 	uci -q set dhcp.cellular6.interface='cellular6'
 	uci -q set dhcp.cellular6.ignore='1'

@@ -3,12 +3,32 @@
 set -eu
 
 action="${1:-start}"
-
 VID="${AIR720_VID:-1286}"
 PID="${AIR720_PID:-4e3d}"
+LOCKDIR=/var/lock/air720-ppp.lock
 
 log() {
 	logger -t air720-ppp "$*" 2>/dev/null || true
+}
+
+release_lock() {
+	rm -rf "$LOCKDIR" 2>/dev/null || true
+}
+
+acquire_lock() {
+	mkdir -p /var/lock
+	if ! mkdir "$LOCKDIR" 2>/dev/null; then
+		oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+		if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+			return 1
+		fi
+		rm -rf "$LOCKDIR" 2>/dev/null || true
+		mkdir "$LOCKDIR" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCKDIR/pid"
+	trap release_lock EXIT
+	trap 'release_lock; exit 1' HUP INT TERM
+	return 0
 }
 
 air720_ifnum() {
@@ -16,6 +36,7 @@ air720_ifnum() {
 	tty="${1##*/}"
 	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
 	ifnum=''
+
 	while [ -n "$p" ] && [ "$p" != / ]; do
 		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
 		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
@@ -37,8 +58,13 @@ is_air720_tty() {
 find_port() {
 	configured="$(uci -q get air720.main.ppp_port || true)"
 	if [ -n "$configured" ] && is_air720_tty "$configured"; then
-		echo "$configured"
-		return 0
+		ifnum="$(air720_ifnum "$configured" 2>/dev/null || true)"
+		case "$ifnum" in
+			03|3)
+				echo "$configured"
+				return 0
+				;;
+		esac
 	fi
 
 	# USB interface 03 is the validated PPP data function. Match the stable USB
@@ -47,7 +73,10 @@ find_port() {
 		[ -c "$candidate" ] || continue
 		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
 		case "$ifnum" in
-			03|3) echo "$candidate"; return 0 ;;
+			03|3)
+				echo "$candidate"
+				return 0
+				;;
 		esac
 	done
 	return 1
@@ -55,7 +84,7 @@ find_port() {
 
 wait_for_port() {
 	count=0
-	while [ "$count" -lt 30 ]; do
+	while [ "$count" -lt 60 ]; do
 		port="$(find_port || true)"
 		[ -n "$port" ] && {
 			echo "$port"
@@ -79,6 +108,8 @@ ensure_wan_zone() {
 
 configure_netifd() {
 	port="$1"
+	auto="$2"
+
 	metric="$(uci -q get air720.main.metric || true)"
 	defaultroute="$(uci -q get air720.main.defaultroute || true)"
 	peerdns="$(uci -q get air720.main.peerdns || true)"
@@ -90,7 +121,6 @@ configure_netifd() {
 	# Native OpenWrt PPP owns pppd and exposes a normal LuCI PPP interface.
 	uci -q set network.cellular='interface'
 	uci -q set network.cellular.proto='ppp'
-	uci -q set network.cellular.device="$port"
 	uci -q set network.cellular.pppname='air720-cellular'
 	uci -q set network.cellular.ipv6='0'
 	uci -q set network.cellular.connect='/usr/libexec/air720-chat-connect'
@@ -98,27 +128,62 @@ configure_netifd() {
 	uci -q set network.cellular.metric="$metric"
 	uci -q set network.cellular.defaultroute="$defaultroute"
 	uci -q set network.cellular.peerdns="$peerdns"
-	uci -q set network.cellular.pppd_options='noaccomp nopcomp novj nobsdcomp noauth nocrtscts 115200'
+	uci -q set network.cellular.pppd_options='noaccomp nopcomp novj nobsdcomp noauth nocrtscts noipv6 115200'
+	uci -q set network.cellular.auto="$auto"
+
+	if [ -n "$port" ]; then
+		uci -q set network.cellular.device="$port"
+	else
+		uci -q delete network.cellular.device || true
+	fi
 
 	# Remove fields used only by the superseded custom proto air720.
-	uci -q delete network.cellular.apn
-	uci -q delete network.cellular.dialnumber
-	uci -q delete network.cellular.delay
+	uci -q delete network.cellular.apn || true
+	uci -q delete network.cellular.dialnumber || true
+	uci -q delete network.cellular.delay || true
+
 	uci -q commit network
 	ensure_wan_zone
+
+	# prepare must become visible to netifd/LuCI even before the modem tty exists.
+	ubus call network reload >/dev/null 2>&1 || true
+}
+
+prepare_interface() {
+	port="$(find_port || true)"
+
+	if [ -n "$port" ]; then
+		uci -q set air720.main.ppp_port="$port"
+	else
+		uci -q delete air720.main.ppp_port || true
+	fi
+	uci -q commit air720
+
+	# Preparation creates a stable LuCI/netifd object without triggering a dial.
+	configure_netifd "$port" 0
 }
 
 case "$action" in
+	prepare)
+		acquire_lock || exit 0
+		prepare_interface
+		;;
 	start)
+		acquire_lock || exit 0
+
 		port="$(wait_for_port || true)"
 		if [ -z "$port" ]; then
+			configure_netifd "" 0
+			log "PPP interface prepared but USB interface 03 is not available yet"
 			echo "No Air720S/SL PPP serial port (USB interface 03) was found." >&2
-			echo "Run air720-ports and set air720.main.ppp_port if needed." >&2
+			echo "The cellular interface remains present with auto=0; tty hotplug will retry." >&2
 			exit 1
 		fi
+
 		uci -q set air720.main.ppp_port="$port"
 		uci -q commit air720
-		configure_netifd "$port"
+
+		configure_netifd "$port" 1
 		log "Starting native OpenWrt PPP IPv4 on $port"
 		ifup cellular
 		;;
@@ -134,7 +199,7 @@ case "$action" in
 		ubus call network.interface.cellular status
 		;;
 	*)
-		echo "Usage: air720-ppp {start|stop|restart|status}" >&2
+		echo "Usage: air720-ppp {prepare|start|stop|restart|status}" >&2
 		exit 2
 		;;
 esac

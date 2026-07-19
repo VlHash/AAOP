@@ -8,10 +8,14 @@ start() {
 	case "$mode" in
 		hybrid)
 			logger -t air720 "Starting PPPv4 + RNDIS/ECMv6 hybrid mode" 2>/dev/null || true
+			# Create the native netifd/LuCI PPP interface synchronously first so it
+			# exists even if the modem tty enumerates late.
+			/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare.log 2>&1 || true
 			/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 &
 			/usr/bin/air720-rndis6 start >/tmp/air720-rndis6.log 2>&1 &
 			;;
 		ppp)
+			/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare.log 2>&1 || true
 			/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 &
 			;;
 		rndis6)
