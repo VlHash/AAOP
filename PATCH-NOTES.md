@@ -1,121 +1,115 @@
-# AAOP LL-AR750S CI patch
+# AAOP Air720SL + USB storage update
 
-This archive contains only files changed or added for the next productized
-Cellu-AR750S build. Copy the contents into the root of the `VlHash/AAOP`
-repository and commit them.
+This bundle contains only files that should replace or be added in `VlHash/AAOP`.
+It does not contain the whole repository and does not perform any Git push.
 
-## What changes
+## Air720SL changes
 
-- Keeps the actual OpenWrt build target at `ath79/generic`.
-- Keeps the validated internal device ID `embstar_m31`.
-- Keeps the validated Oolite-compatible TP-Link image ABI and flash layout.
-- Changes the visible model to `LiteLumine Cellu-AR750S`.
-- LuCI Overview displays `Target Platform: ath79/Embstar` using a UI-only
-  override; `/etc/openwrt_release` and the real target stay `ath79/generic`.
-- Default LAN becomes `192.168.165.1/24`.
-- Both 2.4 GHz and 5 GHz APs are enabled with SSID `LL-AR750S`.
-- Default Wi-Fi remains open because no product password policy was specified.
-- Adds system/WLAN/WAN/LAN LED triggers.
-- Uses `luci-light` rather than the full `luci` collection to reduce flash use.
-- Includes LuCI firewall and package-manager pages.
-- Adds Air720SL RNDIS/ECM drivers.
-- Adds Air720SL USB serial/Option drivers, PPP fallback, picocom AT terminal,
-  and helper scripts.
+The previous tree had the right userspace building blocks, but its primary
+strategy was RNDIS and `air720-bind` used the `option1/new_id` sysfs interface.
+That is insufficient for Air720S/SL PPP reliability because a dynamic USB ID
+cannot carry the device-specific `option` driver flags.
 
-## Air720SL strategy
+The new Linux 6.12 patch adds Luat Air720S/SL `1286:4e3d` with:
 
-RNDIS is the primary connection path. When a USB interface driven by
-`rndis_host` or `cdc_ether` appears, the hotplug script creates:
+- `RSVD(0) | RSVD(1)`: keep the `option` serial driver away from composite
+  interfaces 0 and 1 used by the network function;
+- `ZLP`: use USB zero-length packets on bulk OUT transfers, matching the old
+  Luat `usb_wwan.c` workaround through the modern driver flag;
+- `reset_resume = usb_wwan_resume`: restore serial operation after USB reset
+  resume.
 
-- network interface: `cellular`
-- protocol: DHCP
-- metric: 20
-- firewall zone: existing `wan` zone
+The default connection policy is now host-controlled PPP.  `air720-ppp` creates
+and controls a netifd interface named `cellular` using the custom `proto air720`,
+which deliberately uses `nocrtscts` as in the Luat PPP guidance.  The interface
+is added to the existing `wan` firewall zone.
 
-The physical Ethernet WAN therefore remains preferred while it is connected.
-Change route metrics later if cellular should be primary.
-
-PPP is intentionally a fallback and is not started automatically.
-
-### AT terminal
-
-If `/dev/ttyUSB*` is already present:
+RNDIS/ECM remains available but is opt-in:
 
 ```sh
-air720-at
+uci set air720.main.rndis_fallback='1'
+uci commit air720
 ```
 
-Or specify the port:
+The RNDIS hotplug hook now checks the parent USB VID:PID and will not hijack
+unrelated RNDIS/CDC Ethernet devices.
 
-```sh
-air720-at /dev/ttyUSB2
-```
-
-If only RNDIS is present and there is no ttyUSB device:
+### Bring-up
 
 ```sh
 air720-bind
+air720-ports
 ```
 
-`air720-bind` dynamically adds the detected USB VID/PID to the Linux `option`
-USB-serial driver. This is manual because some Air720 firmware USB descriptor
-layouts require an interface-specific kernel quirk/blacklist; automatically
-binding every interface could conflict with RNDIS.
-
-### PPP fallback
-
-Optionally set APN and the confirmed MODEM port:
+Run `air720-ports` first. With the default composite layout, USB interface 02 is expected to be AT and interface 03 PPP; after interfaces 0/1 are reserved these are commonly `ttyUSB0` and `ttyUSB1`. Confirm the ports, then persist the PPP port and carrier APN:
 
 ```sh
-uci set air720.main.apn='cmnet'
-uci set air720.main.ppp_port='/dev/ttyUSB3'
+uci set air720.main.ppp_port='/dev/ttyUSB1'
+uci set air720.main.apn='YOUR_APN'
 uci commit air720
 air720-ppp start
 ```
 
-Stop it with:
+Check status with:
+
+```sh
+air720-ppp status
+logread -f
+ip addr show air720-cellular
+```
+
+Stop the dial session through OpenWrt/netifd:
 
 ```sh
 air720-ppp stop
 ```
 
-For normal RNDIS operation, PPP is not required.
+The helper intentionally no longer writes to `option1/new_id` for this modem.
 
-## ROM-size policy
+## EXT4, NTFS and USB storage
 
-This patch deliberately avoids:
+The image now selects:
 
-- full `luci` collection
-- `luci-app-attendedsysupgrade`
-- `owut`
-- `usbutils`
+- `kmod-usb-storage`
+- `block-mount`
+- `kmod-fs-ext4`
+- `kmod-fs-ntfs3`
 
-It includes `picocom` because a reliable AT terminal is useful during the
-Air720SL bring-up. It can be removed later after the modem integration is
-stable.
+`/etc/config/fstab` enables anonymous and hotplug mounting.  Therefore a USB
+mass-storage device should be detected and mounted by the OpenWrt block hotplug
+path when the hardware exposes a usable USB host port (directly or through a
+compatible powered hub).  The M31/Air720 hardware arrangement may physically
+occupy the available USB host connection; the filesystem support remains in the
+firmware even when no second storage device can be attached.
 
-After a clean `sysupgrade -n`, check actual free overlay space:
-
-```sh
-df -h
-apk list -I
-du -sh /overlay/upper 2>/dev/null
-```
-
-## First test after flashing
-
-1. Confirm LuCI model and UI-only target label.
-2. Confirm LAN DHCP on `192.168.165.1`.
-3. Confirm both radios advertise `LL-AR750S`.
-4. Confirm LED triggers.
-5. Attach Air720SL and run:
+Useful checks:
 
 ```sh
 dmesg | tail -100
-ip link
-ls -l /dev/ttyUSB*
-ubus call network.interface.cellular status
+block info
+mount
+ls -l /dev/sd*
 ```
 
-6. Test AT with `air720-at`.
-7. Only test `air720-ppp` after the correct MODEM ttyUSB port is confirmed.
+`e2fsprogs` is deliberately not included to save flash; format EXT4 media on a
+PC or install the tools later if free overlay space permits.
+
+## CI changes
+
+The workflow now validates:
+
+1. the Air720 kernel patch is present before the build;
+2. modem, PPP, EXT4, NTFS3, USB-storage and block-mount package selections are
+   accepted by `make defconfig`;
+3. the prepared Linux 6.12 source contains `1286:4e3d`, `RSVD(0)|RSVD(1)|ZLP`
+   and `reset_resume` after `target/linux` compilation;
+4. the final firmware manifest contains the required modem and storage packages;
+5. the final rootfs contains the Air720 netifd protocol and hotplug/fstab files.
+
+## Obsolete files to remove
+
+The bundle also contains an updated `DELETE-OLD-FILES.txt`.  In particular,
+remove the old `port/files/files/etc/ppp/peers/air720` and
+`port/files/files/usr/libexec/air720-chat-disconnect`; the CI defensively removes
+them from the OpenWrt overlay as well, so an older controller checkout cannot
+accidentally keep the direct-`pppd` path in the firmware.

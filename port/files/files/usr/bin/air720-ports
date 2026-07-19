@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -eu
+
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
+found=0
+
+for dev in /sys/class/tty/ttyUSB*; do
+	[ -e "$dev/device" ] || continue
+	tty="${dev##*/}"
+	p="$(readlink -f "$dev/device")"
+	ifnum='?'
+	match=0
+
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ "$ifnum" != '?' ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || echo '?')"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			v="$(tr 'A-F' 'a-f' < "$p/idVendor")"
+			q="$(tr 'A-F' 'a-f' < "$p/idProduct")"
+			[ "$v" = "$VID" ] && [ "$q" = "$PID" ] && match=1
+			break
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+
+	[ "$match" -eq 1 ] || continue
+	found=1
+	driver="$(basename "$(readlink -f "$dev/device/driver" 2>/dev/null || echo unknown)")"
+	case "$ifnum" in
+		02|2) role='AT(expected)' ;;
+		03|3) role='PPP(expected)' ;;
+		04|4) role='DIAG(expected)' ;;
+		*) role='unknown' ;;
+	esac
+	printf '%-14s interface=%-3s role=%-14s driver=%s usb=%s:%s\n' \
+		"/dev/$tty" "$ifnum" "$role" "$driver" "$VID" "$PID"
+done
+
+[ "$found" -eq 1 ] || {
+	echo "No Air720S/SL ttyUSB ports found for USB ${VID}:${PID}." >&2
+	exit 1
+}

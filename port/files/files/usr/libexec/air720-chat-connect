@@ -1,26 +1,32 @@
 #!/bin/sh
 
-APN="$(uci -q get air720.main.apn || true)"
+APN="${USE_APN:-$(uci -q get air720.main.apn || true)}"
+DIAL="${DIALNUMBER:-$(uci -q get air720.main.dialnumber || true)}"
+[ -n "$DIAL" ] || DIAL='*99#'
 
 if [ -n "$APN" ]; then
-	exec chat -s -v \
+	exec /usr/sbin/chat -s -v \
 		ABORT 'BUSY' \
 		ABORT 'NO CARRIER' \
+		ABORT 'NO DIALTONE' \
 		ABORT 'ERROR' \
-		TIMEOUT 15 \
+		TIMEOUT 30 \
 		'' 'AT' \
 		'OK' 'ATE0' \
+		'OK' 'AT&D2' \
 		'OK' "AT+CGDCONT=1,\"IP\",\"$APN\"" \
-		'OK' 'ATD*99#' \
+		'OK' "ATD$DIAL" \
 		'CONNECT' ''
 else
-	exec chat -s -v \
+	exec /usr/sbin/chat -s -v \
 		ABORT 'BUSY' \
 		ABORT 'NO CARRIER' \
+		ABORT 'NO DIALTONE' \
 		ABORT 'ERROR' \
-		TIMEOUT 15 \
+		TIMEOUT 30 \
 		'' 'AT' \
 		'OK' 'ATE0' \
-		'OK' 'ATD*99#' \
+		'OK' 'AT&D2' \
+		'OK' "ATD$DIAL" \
 		'CONNECT' ''
 fi

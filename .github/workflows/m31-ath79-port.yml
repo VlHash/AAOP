@@ -29,12 +29,12 @@ on:
         default: "0"
         type: string
       build_after_ssh:
-        description: "Run target/linux and DTB validation after SSH"
+        description: "Run target/linux, DTB and Air720 kernel-patch validation after SSH"
         required: true
         default: true
         type: boolean
       full_image_after_target:
-        description: "Build M31 initramfs and sysupgrade images after DTB validation"
+        description: "Build and validate M31 initramfs/sysupgrade images after target validation"
         required: true
         default: true
         type: boolean
@@ -62,6 +62,8 @@ env:
   DEVICE_CONFIG_SYMBOL: CONFIG_TARGET_ath79_generic_DEVICE_embstar_m31
   DEVICE_ID: embstar_m31
   DTS_NAME: qca9531_embstar_m31
+  AIR720_USB_ID: 1286:4e3d
+  AIR720_KERNEL_PATCH: target/linux/generic/pending-6.12/999-usb-serial-option-air720s.patch
 
 jobs:
   port-and-build:
@@ -85,7 +87,14 @@ jobs:
           safe_ref="$(printf '%s' '${{ inputs.openwrt_ref }}' | tr '/: ' '___')"
           echo "safe_ref=${safe_ref}" >> "$GITHUB_OUTPUT"
 
-          mkdir -p "$EVIDENCE_DIR/vendor-embstar"             "$EVIDENCE_DIR/reference-ath79"             "$STATE_DIR/logs" "$STATE_DIR/config" "$STATE_DIR/source"             "$STATE_DIR/firmware" "$STATE_DIR/reuse/port/patches"
+          mkdir -p \
+            "$EVIDENCE_DIR/vendor-embstar" \
+            "$EVIDENCE_DIR/reference-ath79" \
+            "$STATE_DIR/logs" \
+            "$STATE_DIR/config" \
+            "$STATE_DIR/source" \
+            "$STATE_DIR/firmware" \
+            "$STATE_DIR/reuse/port/patches"
 
           {
             echo "run_id=${GITHUB_RUN_ID}"
@@ -95,6 +104,7 @@ jobs:
             echo "openwrt_ref=${{ inputs.openwrt_ref }}"
             echo "embstar_vendor_commit=${EMBSTAR_VENDOR_COMMIT}"
             echo "device=${DEVICE_ID}"
+            echo "air720_usb_id=${AIR720_USB_ID}"
             date -u +"started_utc=%Y-%m-%dT%H:%M:%SZ"
           } | tee "$STATE_DIR/run-metadata.txt"
 
@@ -103,7 +113,11 @@ jobs:
         run: |
           set -euo pipefail
           df -h
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc             /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
           sudo docker system prune --all --force --volumes || true
           df -h
 
@@ -112,7 +126,16 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends             asciidoc autoconf automake autopoint bc binutils bison build-essential             bzip2 ccache clang cmake curl device-tree-compiler diffutils file flex             g++ g++-multilib gawk gcc gcc-multilib gettext git help2man jq             libelf-dev liblzma-dev libncurses-dev libssl-dev libtool-bin             libxml2-utils libxslt1-dev make mtd-utils ninja-build openssh-server             patch pkg-config python3 python3-dev python3-pip python3-setuptools             python3-pyelftools rsync screen sharutils subversion swig tar texinfo             time tmux tree u-boot-tools unzip uuid-runtime wget xxd xz-utils             zlib1g-dev zstd
+          sudo apt-get install --yes --no-install-recommends \
+            asciidoc autoconf automake autopoint bc binutils bison build-essential \
+            bzip2 ccache clang cmake curl device-tree-compiler diffutils file flex \
+            g++ g++-multilib gawk gcc gcc-multilib gettext git help2man jq \
+            libelf-dev liblzma-dev libncurses-dev libssl-dev libtool-bin \
+            libxml2-utils libxslt1-dev make mtd-utils ninja-build openssh-server \
+            patch pkg-config python3 python3-dev python3-pip python3-setuptools \
+            python3-pyelftools rsync screen sharutils subversion swig tar texinfo \
+            time tmux tree u-boot-tools unzip uuid-runtime wget xxd xz-utils \
+            zlib1g-dev zstd
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
@@ -184,6 +207,8 @@ jobs:
             "target/linux/ath79/dts/qca9531_qxwlan_e600gac-v2-16m.dts"
             "target/linux/ath79/image/generic.mk"
             "target/linux/ath79/generic/base-files/etc/board.d/02_network"
+            "package/kernel/linux/modules/fs.mk"
+            "package/kernel/linux/modules/usb.mk"
           )
 
           for rel in "${refs[@]}"; do
@@ -201,6 +226,13 @@ jobs:
           shopt -s nullglob
 
           rsync -a --exclude '.gitkeep' "$CONTROLLER_DIR/port/files/" "$OPENWRT_DIR/"
+
+          # Remove the superseded direct-pppd fallback if it is still present in
+          # an older controller checkout.  Cellular PPP is now owned by netifd.
+          rm -f \
+            "$OPENWRT_DIR/files/etc/ppp/peers/air720" \
+            "$OPENWRT_DIR/files/usr/libexec/air720-chat-disconnect"
+
           python3 "$CONTROLLER_DIR/port/apply-m31.py" "$OPENWRT_DIR"
 
           for patch in "$CONTROLLER_DIR"/port/patches/*.patch; do
@@ -215,7 +247,12 @@ jobs:
             fi
           done
 
-          git -C "$OPENWRT_DIR" diff --check
+          test -f "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+          grep -q 'AIR720S_VENDOR_ID' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+          grep -q 'RSVD(0) | RSVD(1) | ZLP' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+          grep -q 'reset_resume' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+
+          git -C "$OPENWRT_DIR" diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
           git -C "$OPENWRT_DIR" status --short
 
       - name: Update and install feeds
@@ -226,7 +263,7 @@ jobs:
           ./scripts/feeds update -a 2>&1 | tee "$STATE_DIR/logs/feeds-update.log"
           ./scripts/feeds install -a 2>&1 | tee "$STATE_DIR/logs/feeds-install.log"
 
-      - name: Create M31 ath79 configuration
+      - name: Create and validate M31 configuration
         shell: bash
         working-directory: ${{ env.OPENWRT_DIR }}
         run: |
@@ -235,17 +272,33 @@ jobs:
           rm -f tmp/.config-target.in tmp/.config-target.in.prereq
           make defconfig
 
-          grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config || {
-            echo "::error::M31 device symbol was not accepted."
-            exit 2
-          }
+          required_symbols=(
+            "$DEVICE_CONFIG_SYMBOL"
+            CONFIG_PACKAGE_kmod-usb-net-rndis
+            CONFIG_PACKAGE_kmod-usb-serial-option
+            CONFIG_PACKAGE_kmod-ppp
+            CONFIG_PACKAGE_ppp
+            CONFIG_PACKAGE_chat
+            CONFIG_PACKAGE_kmod-usb-storage
+            CONFIG_PACKAGE_block-mount
+            CONFIG_PACKAGE_kmod-fs-ext4
+            CONFIG_PACKAGE_kmod-fs-ntfs3
+          )
+
+          for symbol in "${required_symbols[@]}"; do
+            if ! grep -Fxq "${symbol}=y" .config; then
+              echo "::error::Required OpenWrt symbol was not accepted: ${symbol}=y"
+              exit 2
+            fi
+          done
+
           ./scripts/diffconfig.sh | tee "$STATE_DIR/config/baseline.diffconfig"
 
       - name: Prepare persistent SSH shell environment
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$HOME/.openwrt-action-env" <<EOF
+          cat > "$HOME/.openwrt-action-env" <<EOF_ENV
           export GITHUB_WORKSPACE="$GITHUB_WORKSPACE"
           export CONTROLLER_DIR="$CONTROLLER_DIR"
           export OPENWRT_DIR="$OPENWRT_DIR"
@@ -259,20 +312,20 @@ jobs:
           port-status() {
             cd "\$OPENWRT_DIR" || return
             git status --short --branch
-            grep -E 'CONFIG_TARGET_ath79|embstar_m31|ROOTFS_INITRAMFS' .config || true
+            grep -E 'CONFIG_TARGET_ath79|embstar_m31|kmod-fs-(ext4|ntfs3)|kmod-usb-storage' .config || true
           }
-          EOF
+          EOF_ENV
 
           source_line='[ -f "$HOME/.openwrt-action-env" ] && . "$HOME/.openwrt-action-env"'
           grep -qxF "$source_line" "$HOME/.bashrc" || echo "$source_line" >> "$HOME/.bashrc"
           grep -qxF "$source_line" "$HOME/.profile" || echo "$source_line" >> "$HOME/.profile"
 
-          sudo tee /usr/local/sbin/finish-porting >/dev/null <<'FINISH'
+          sudo tee /usr/local/sbin/finish-porting >/dev/null <<'EOF_FINISH'
           #!/usr/bin/env bash
           set -euo pipefail
           touch /continue
           echo "M31 porting session released."
-          FINISH
+          EOF_FINISH
           sudo chmod 0755 /usr/local/sbin/finish-porting
 
       - name: Build and validate host tools
@@ -284,7 +337,8 @@ jobs:
           set -o pipefail
           if [[ ! -x staging_dir/host/bin/m4 ]] || ! staging_dir/host/bin/m4 --version >/dev/null 2>&1; then
             rm -rf build_dir/host build_dir/hostpkg staging_dir/host staging_dir/hostpkg tmp/stage-tools
-            make tools/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/tools-install.log" ||               make tools/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/tools-install-serial.log"
+            make tools/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/tools-install.log" || \
+              make tools/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/tools-install-serial.log"
           fi
           staging_dir/host/bin/m4 --version | head | tee "$STATE_DIR/tools-validation.txt"
 
@@ -296,12 +350,14 @@ jobs:
           set -euo pipefail
           set -o pipefail
           find_gcc() {
-            find staging_dir/toolchain-* \( -type f -o -type l \)               -name 'mips-openwrt-linux-musl-gcc' -print -quit 2>/dev/null
+            find staging_dir/toolchain-* \( -type f -o -type l \) \
+              -name 'mips-openwrt-linux-musl-gcc' -print -quit 2>/dev/null
           }
           toolchain_gcc="$(find_gcc || true)"
           if [[ -z "$toolchain_gcc" ]] || [[ ! -x "$toolchain_gcc" ]] || ! "$toolchain_gcc" --version >/dev/null 2>&1; then
             rm -rf build_dir/toolchain-mips_24kc* staging_dir/toolchain-mips_24kc* tmp/stage-toolchain
-            make toolchain/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/toolchain-install.log" ||               make toolchain/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/toolchain-install-serial.log"
+            make toolchain/install -j"$(nproc)" V=s 2>&1 | tee "$STATE_DIR/logs/toolchain-install.log" || \
+              make toolchain/install -j1 V=sc 2>&1 | tee "$STATE_DIR/logs/toolchain-install-serial.log"
             toolchain_gcc="$(find_gcc || true)"
           fi
           test -n "$toolchain_gcc"
@@ -348,7 +404,7 @@ jobs:
 
           sudo install -d -m 0755 /run/sshd
           sudo ssh-keygen -A
-          sudo tee /etc/ssh/sshd_config.d/90-openwrt-action.conf >/dev/null <<SSHD
+          sudo tee /etc/ssh/sshd_config.d/90-openwrt-action.conf >/dev/null <<EOF_SSHD
           Port 22
           ListenAddress 0.0.0.0
           AddressFamily inet
@@ -364,7 +420,7 @@ jobs:
           ClientAliveInterval 30
           ClientAliveCountMax 10
           AllowUsers ${ssh_user}
-          SSHD
+          EOF_SSHD
           sudo /usr/sbin/sshd -t
           sudo systemctl restart ssh
 
@@ -383,7 +439,8 @@ jobs:
 
           docker pull openfrp/frpc:latest
           docker rm --force openfrp-ssh >/dev/null 2>&1 || true
-          docker run --detach --name openfrp-ssh --network host             openfrp/frpc:latest -u "$OPENFRP_TOKEN" -p "$OPENFRP_TUNNEL_ID"
+          docker run --detach --name openfrp-ssh --network host \
+            openfrp/frpc:latest -u "$OPENFRP_TOKEN" -p "$OPENFRP_TUNNEL_ID"
           sleep 8
 
           {
@@ -418,7 +475,7 @@ jobs:
           sudo systemctl stop ssh
           sudo rm -f /continue
 
-      - name: Verify selected M31 source
+      - name: Verify selected M31 source and package configuration
         if: ${{ inputs.build_after_ssh }}
         shell: bash
         working-directory: ${{ env.OPENWRT_DIR }}
@@ -427,8 +484,13 @@ jobs:
           make defconfig
           grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config
           test -f "target/linux/ath79/dts/${DTS_NAME}.dts"
+          test -f "$AIR720_KERNEL_PATCH"
           grep -q '^define Device/embstar_m31$' target/linux/ath79/image/generic.mk
-          git diff --check
+          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ext4=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ntfs3=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-usb-storage=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_block-mount=y' .config
+          git diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
           ./scripts/diffconfig.sh | tee "$STATE_DIR/config/pre-target-build.diffconfig"
 
       - name: Compile target/linux and M31 DTB
@@ -455,7 +517,8 @@ jobs:
           fi
 
           if [[ "$rc" -eq 0 ]]; then
-            dtb="$(find build_dir/target-mips_24kc_musl/linux-ath79_generic               -maxdepth 1 -type f -name "image-${DTS_NAME}.dtb" -print -quit)"
+            dtb="$(find build_dir/target-mips_24kc_musl/linux-ath79_generic \
+              -maxdepth 1 -type f -name "image-${DTS_NAME}.dtb" -print -quit)"
             if [[ -z "$dtb" || ! -f "$dtb" ]]; then
               rc=3
             else
@@ -466,6 +529,28 @@ jobs:
 
           echo "$rc" | tee "$STATE_DIR/target-build-exit-code.txt"
           exit "$rc"
+
+      - name: Verify Air720SL kernel patch in prepared Linux source
+        if: ${{ inputs.build_after_ssh && steps.target_build.outcome == 'success' }}
+        shell: bash
+        working-directory: ${{ env.OPENWRT_DIR }}
+        run: |
+          set -euo pipefail
+          option_c="$(find build_dir/target-mips_24kc_musl/linux-ath79_generic \
+            -type f -path '*/linux-6.12*/drivers/usb/serial/option.c' -print -quit)"
+          test -n "$option_c" && test -f "$option_c"
+
+          grep -q '#define AIR720S_VENDOR_ID' "$option_c"
+          grep -q '0x1286' "$option_c"
+          grep -q '#define AIR720S_PRODUCT_ID' "$option_c"
+          grep -q '0x4e3d' "$option_c"
+          grep -q 'RSVD(0) | RSVD(1) | ZLP' "$option_c"
+          grep -q 'reset_resume.*usb_wwan_resume' "$option_c"
+
+          {
+            echo "Air720 kernel source: $option_c"
+            grep -n -E 'AIR720S_|RSVD\(0\).*RSVD\(1\).*ZLP|reset_resume' "$option_c"
+          } | tee "$STATE_DIR/air720-kernel-validation.txt"
 
       - name: Download remaining package sources
         if: ${{ inputs.full_image_after_target && steps.target_build.outcome == 'success' }}
@@ -507,11 +592,45 @@ jobs:
 
           test -n "$initramfs" && test -f "$initramfs"
           test -n "$sysupgrade" && test -f "$sysupgrade"
+          test -n "$manifest" && test -f "$manifest"
 
-          cp -a "$initramfs" "$sysupgrade" "$STATE_DIR/firmware/"
-          [[ -n "$manifest" && -f "$manifest" ]] && cp -a "$manifest" "$STATE_DIR/firmware/"
-          find "$STATE_DIR/firmware" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort             | tee "$STATE_DIR/firmware/FILES.txt"
+          required_packages=(
+            kmod-usb-net-rndis
+            kmod-usb-serial-option
+            kmod-ppp
+            ppp
+            chat
+            kmod-usb-storage
+            block-mount
+            kmod-fs-ext4
+            kmod-fs-ntfs3
+          )
+
+          for package in "${required_packages[@]}"; do
+            if ! grep -Eq "^${package}([[:space:]]|$)" "$manifest"; then
+              echo "::error::Firmware manifest is missing required package: $package"
+              exit 4
+            fi
+          done
+
+          rootfs="$(find build_dir/target-mips_24kc_musl -maxdepth 2 -type d -name root-ath79 -print -quit)"
+          test -n "$rootfs" && test -d "$rootfs"
+          test -f "$rootfs/lib/netifd/proto/air720.sh"
+          test -f "$rootfs/etc/config/air720"
+          test -f "$rootfs/etc/config/fstab"
+          test -f "$rootfs/etc/hotplug.d/net/95-air720-rndis"
+          test -x "$rootfs/usr/bin/air720-ppp"
+          test -x "$rootfs/usr/bin/air720-ports"
+
+          cp -a "$initramfs" "$sysupgrade" "$manifest" "$STATE_DIR/firmware/"
+          find "$STATE_DIR/firmware" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort \
+            | tee "$STATE_DIR/firmware/FILES.txt"
           sha256sum "$STATE_DIR"/firmware/* > "$STATE_DIR/firmware/SHA256SUMS.txt" || true
+
+          {
+            echo "Validated firmware packages:"
+            printf '%s\n' "${required_packages[@]}"
+          } | tee "$STATE_DIR/firmware/package-validation.txt"
 
       - name: Export reusable M31 port state
         if: ${{ always() }}
@@ -531,14 +650,16 @@ jobs:
           done < <(git ls-files -z --others --exclude-standard)
 
           git diff --binary > "$STATE_DIR/source/m31-ath79-complete.patch"
-          cp "$STATE_DIR/source/m31-ath79-complete.patch"             "$STATE_DIR/reuse/port/patches/0001-m31-ath79-current.patch"
+          cp "$STATE_DIR/source/m31-ath79-complete.patch" \
+            "$STATE_DIR/reuse/port/patches/0001-m31-ath79-current.patch"
 
           cp -a .config "$STATE_DIR/config/full.config" 2>/dev/null || true
           ./scripts/diffconfig.sh > "$STATE_DIR/config/diffconfig.txt" 2>/dev/null || true
           cp "$STATE_DIR/config/diffconfig.txt" "$STATE_DIR/reuse/port/config.seed" 2>/dev/null || true
 
           cp -a "$EVIDENCE_DIR" "$STATE_DIR/evidence"
-          find bin/targets/ath79/generic -maxdepth 1 -type f -printf '%f\t%s bytes\n' 2>/dev/null | sort             > "$STATE_DIR/firmware-files.txt" || true
+          find bin/targets/ath79/generic -maxdepth 1 -type f -printf '%f\t%s bytes\n' 2>/dev/null | sort \
+            > "$STATE_DIR/firmware-files.txt" || true
           df -h > "$STATE_DIR/disk-usage.txt"
 
       - name: Archive selected heavy build state
@@ -548,7 +669,10 @@ jobs:
         run: |
           set -euo pipefail
           heavy_paths=()
-          for path in staging_dir/host staging_dir/hostpkg staging_dir/toolchain-*             build_dir/host build_dir/hostpkg build_dir/toolchain-* tmp/stage-tools tmp/stage-toolchain; do
+          for path in \
+            staging_dir/host staging_dir/hostpkg staging_dir/toolchain-* \
+            build_dir/host build_dir/hostpkg build_dir/toolchain-* \
+            tmp/stage-tools tmp/stage-toolchain; do
             for match in $path; do
               [[ -e "$match" ]] && heavy_paths+=("$match")
             done
@@ -588,10 +712,13 @@ jobs:
             echo "# Embstar M31-128M16 ath79 port run"
             echo
             echo "- OpenWrt ref: \`${{ inputs.openwrt_ref }}\`"
+            echo "- Air720 USB ID: \`${AIR720_USB_ID}\`"
+            echo "- Air720 kernel validation file: \`air720-kernel-validation.txt\`"
+            echo "- Storage support: \`ext4 + ntfs3 + usb-storage + block-mount\`"
             echo "- Target build outcome: \`${{ steps.target_build.outcome }}\`"
             echo "- Full build outcome: \`${{ steps.full_build.outcome }}\`"
             echo
-            echo "Download m31-port-state for logs and the tested exported patch."
+            echo "Download m31-port-state for logs, kernel validation and the exported OpenWrt patch."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail when requested target validation failed

@@ -2,52 +2,53 @@
 
 set -eu
 
-find_usb_ids() {
-	for net in /sys/class/net/*; do
-		[ -e "$net/device/driver" ] || continue
-		driver="$(basename "$(readlink -f "$net/device/driver")")"
-		case "$driver" in
-			rndis_host|cdc_ether) ;;
-			*) continue ;;
-		esac
-
-		p="$(readlink -f "$net/device")"
-		while [ "$p" != "/" ] && [ -n "$p" ]; do
-			if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
-				printf '%s %s\n' "$(cat "$p/idVendor")" "$(cat "$p/idProduct")"
-				return 0
-			fi
-			p="${p%/*}"
-			[ -n "$p" ] || p="/"
-		done
-	done
-	return 1
-}
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
 
 modprobe option 2>/dev/null || true
 
-ids="$(find_usb_ids || true)"
-if [ -z "$ids" ]; then
-	echo "No RNDIS/ECM USB parent found. Pass VID PID manually:"
-	echo "  air720-bind 1234 5678"
+usbdev=''
+for p in /sys/bus/usb/devices/*; do
+	[ -r "$p/idVendor" ] && [ -r "$p/idProduct" ] || continue
+	v="$(tr 'A-F' 'a-f' < "$p/idVendor")"
+	q="$(tr 'A-F' 'a-f' < "$p/idProduct")"
+	if [ "$v" = "$VID" ] && [ "$q" = "$PID" ]; then
+		usbdev="$p"
+		break
+	fi
+done
+
+if [ -z "$usbdev" ]; then
+	echo "Air720S/SL USB device ${VID}:${PID} was not found." >&2
 	exit 1
 fi
 
-vid="${1:-$(echo "$ids" | awk '{print $1}')}"
-pid="${2:-$(echo "$ids" | awk '{print $2}')}"
+echo "Air720S/SL detected at ${usbdev##*/} (${VID}:${PID})"
+echo "Composite interfaces:"
+for intf in "$usbdev":*; do
+	[ -d "$intf" ] || continue
+	ifnum="$(cat "$intf/bInterfaceNumber" 2>/dev/null || echo '?')"
+	driver="$(basename "$(readlink -f "$intf/driver" 2>/dev/null || echo unbound)")"
+	printf '  interface=%-3s driver=%s\n' "$ifnum" "$driver"
+done
 
-new_id=/sys/bus/usb-serial/drivers/option1/new_id
-if [ ! -w "$new_id" ]; then
-	echo "option1 new_id is unavailable: $new_id"
-	exit 1
+echo
+if air720-ports; then
+	exit 0
 fi
 
-echo "Binding unclaimed USB serial interfaces for VID:PID ${vid}:${pid}"
-echo "$vid $pid" > "$new_id" 2>/dev/null || true
-sleep 1
+cat >&2 <<'MSG'
+The modem is present but no Air720 ttyUSB port is bound.
 
-ls -l /dev/ttyUSB* 2>/dev/null || {
-	echo "No ttyUSB node appeared."
-	echo "The modem may need a kernel interface blacklist/quirk for its exact USB descriptor."
-	exit 2
-}
+Do not use option1/new_id as the primary workaround for 1286:4e3d: dynamic
+IDs do not carry the Air720 RSVD(0)|RSVD(1)|ZLP driver_info flags and may bind
+the RNDIS/ECM interfaces or reproduce PPP bulk-transfer failures.
+
+Check:
+  dmesg | tail -100
+  lsmod | grep -E 'option|usb_wwan|usbserial'
+
+The AAOP kernel patch should add 1286:4e3d statically to option.c with
+RSVD(0)|RSVD(1)|ZLP.
+MSG
+exit 2

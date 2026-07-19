@@ -1,0 +1,51 @@
+From: AAOP <aaop@local>
+Subject: [PATCH] USB: serial: option: add Luat Air720S/SL quirks
+
+Luat Air720S-series modules, including Air720SL, use USB VID:PID
+1286:4e3d. The vendor Linux integration notes require four behaviours:
+
+  - bind the device to the option USB-serial driver;
+  - do not bind composite interfaces 0 and 1, which belong to the
+    RNDIS/ECM networking function;
+  - terminate bulk OUT transfers with a zero-length packet;
+  - handle USB reset-resume using the normal usb_wwan resume path.
+
+Modern option.c already has per-device RSVD() and ZLP flags, so encode the
+first three requirements in the device table instead of open-coding checks
+in option_probe() and usb_wwan.c. This avoids the unsafe dynamic new_id
+workaround, which cannot attach driver_info quirks.
+
+---
+ drivers/usb/serial/option.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -616,6 +616,10 @@
+ #define SIERRA_PRODUCT_EM9191			0x90d3
+ #define SIERRA_PRODUCT_EM9291			0x90e3
+ 
++/* Luat Air720S/SL series based on ASR1802/ASR1802S */
++#define AIR720S_VENDOR_ID			0x1286
++#define AIR720S_PRODUCT_ID			0x4e3d
++
+ /* UNISOC (Spreadtrum) products */
+ #define UNISOC_VENDOR_ID			0x1782
+ /* TOZED LT70-C based on UNISOC SL8563 uses UNISOC's vendor ID */
+@@ -2524,6 +2528,9 @@ static const struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(SIERRA_VENDOR_ID, SIERRA_PRODUCT_EM9191, 0xff, 0, 0) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(SIERRA_VENDOR_ID, SIERRA_PRODUCT_EM9291, 0xff, 0xff, 0x30) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(SIERRA_VENDOR_ID, SIERRA_PRODUCT_EM9291, 0xff, 0xff, 0x40) },
++	{ USB_DEVICE(AIR720S_VENDOR_ID, AIR720S_PRODUCT_ID),
++	  .driver_info = RSVD(0) | RSVD(1) | ZLP },
++
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(UNISOC_VENDOR_ID, TOZED_PRODUCT_LT70C, 0xff, 0, 0) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(UNISOC_VENDOR_ID, UNISOC_PRODUCT_UIS7720, 0xff, 0, 0) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(UNISOC_VENDOR_ID, LUAT_PRODUCT_AIR720U, 0xff, 0, 0) },
+@@ -2564,6 +2571,7 @@ static struct usb_serial_driver option_1port_device = {
+ #ifdef CONFIG_PM
+ 	.suspend           = usb_wwan_suspend,
+ 	.resume            = usb_wwan_resume,
++	.reset_resume      = usb_wwan_resume,
+ #endif
+ };

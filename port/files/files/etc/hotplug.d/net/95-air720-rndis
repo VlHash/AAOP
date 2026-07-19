@@ -1,31 +1,41 @@
 #!/bin/sh
 
-[ "$ACTION" = "add" ] || exit 0
+[ "$ACTION" = add ] || exit 0
 [ -n "$INTERFACE" ] || exit 0
+[ "$(uci -q get air720.main.rndis_fallback || echo 0)" = 1 ] || exit 0
 [ -e "/sys/class/net/$INTERFACE/device/driver" ] || exit 0
 
 driver="$(basename "$(readlink -f "/sys/class/net/$INTERFACE/device/driver")")"
-
 case "$driver" in
-	rndis_host|cdc_ether)
-		;;
-	*)
-		exit 0
-		;;
+	rndis_host|cdc_ether) ;;
+	*) exit 0 ;;
 esac
 
-# Dedicated Cellu-AR750S cellular interface. Wired WAN keeps the lower
-# default metric, so it remains preferred when both uplinks are present.
+# Restrict this hook to the Luat Air720S/SL USB device.  The previous version
+# treated every RNDIS/CDC Ethernet dongle as the cellular modem.
+p="$(readlink -f "/sys/class/net/$INTERFACE/device")"
+match=0
+while [ -n "$p" ] && [ "$p" != / ]; do
+	if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+		vid="$(tr 'A-F' 'a-f' < "$p/idVendor")"
+		pid="$(tr 'A-F' 'a-f' < "$p/idProduct")"
+		[ "$vid" = 1286 ] && [ "$pid" = 4e3d ] && match=1
+		break
+	fi
+	p="${p%/*}"
+	[ -n "$p" ] || p=/
+done
+[ "$match" -eq 1 ] || exit 0
+
 uci -q set network.cellular='interface'
 uci -q set network.cellular.device="$INTERFACE"
 uci -q set network.cellular.proto='dhcp'
-uci -q set network.cellular.metric='20'
+uci -q set network.cellular.metric="$(uci -q get air720.main.metric || echo 20)"
 uci -q commit network
 
-# Put the cellular interface into the existing WAN firewall zone.
 wan_zone="$(uci -q show firewall | sed -n "s/^\(firewall\.[^.]*\)\.name='wan'$/\1/p" | head -n1)"
 if [ -n "$wan_zone" ]; then
-	if ! uci -q get "${wan_zone}.network" 2>/dev/null | tr ' ' '\n' | grep -qx 'cellular'; then
+	if ! uci -q get "${wan_zone}.network" 2>/dev/null | tr ' ' '\n' | grep -qx cellular; then
 		uci -q add_list "${wan_zone}.network=cellular"
 		uci -q commit firewall
 	fi

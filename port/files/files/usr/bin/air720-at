@@ -2,23 +2,59 @@
 
 set -eu
 
+# Print the USB interface number for an Air720S/SL tty, e.g. 02/03/04.
+air720_ifnum() {
+	[ -c "$1" ] || return 1
+	tty="${1##*/}"
+	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
+	ifnum=''
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = 1286 ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = 4e3d ] || return 1
+			printf '%s\n' "$ifnum"
+			return 0
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+	return 1
+}
+
 configured="$(uci -q get air720.main.at_port || true)"
 port="${1:-$configured}"
 
 if [ -z "$port" ]; then
-	for candidate in /dev/ttyUSB2 /dev/ttyUSB1 /dev/ttyUSB3 /dev/ttyUSB0; do
-		if [ -c "$candidate" ]; then
+	# Air720S USB mode is ordered RNDIS/ECM + AT + PPP + DIAG.  Once the
+	# network interfaces 0/1 are reserved from option, interface 02 is the
+	# expected AT function and is commonly enumerated as ttyUSB0.  Match the
+	# interface number rather than assuming a ttyUSB index.
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
+		case "$ifnum" in
+			02|2) port="$candidate"; break ;;
+		esac
+	done
+fi
+
+# Last-resort fallback: accept the first serial function belonging to the modem.
+if [ -z "$port" ]; then
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		if air720_ifnum "$candidate" >/dev/null 2>&1; then
 			port="$candidate"
 			break
 		fi
 	done
 fi
 
-if [ -z "$port" ] || [ ! -c "$port" ]; then
-	echo "No Air720 AT serial port found."
-	echo "Try: air720-bind"
-	echo "Then set the confirmed port, for example:"
-	echo "  uci set air720.main.at_port='/dev/ttyUSB2'; uci commit air720"
+if [ -z "$port" ] || ! air720_ifnum "$port" >/dev/null 2>&1; then
+	echo "No confirmed Air720S/SL AT serial port found." >&2
+	echo "Run: air720-ports" >&2
+	echo "Then persist the confirmed AT port:" >&2
+	echo "  uci set air720.main.at_port='/dev/ttyUSB0'; uci commit air720" >&2
 	exit 1
 fi
 

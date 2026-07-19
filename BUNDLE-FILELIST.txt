@@ -1,0 +1,14 @@
+.github/workflows/m31-ath79-port.yml
+DELETE-OLD-FILES.txt
+PATCH-NOTES.md
+port/config.seed
+port/files/files/etc/config/air720
+port/files/files/etc/config/fstab
+port/files/files/etc/hotplug.d/net/95-air720-rndis
+port/files/files/lib/netifd/proto/air720.sh
+port/files/files/usr/bin/air720-at
+port/files/files/usr/bin/air720-bind
+port/files/files/usr/bin/air720-ports
+port/files/files/usr/bin/air720-ppp
+port/files/files/usr/libexec/air720-chat-connect
+port/files/target/linux/generic/pending-6.12/999-usb-serial-option-air720s.patch

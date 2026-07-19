@@ -4,55 +4,122 @@ set -eu
 
 action="${1:-start}"
 
+air720_ifnum() {
+	[ -c "$1" ] || return 1
+	tty="${1##*/}"
+	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
+	ifnum=''
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = 1286 ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = 4e3d ] || return 1
+			printf '%s\n' "$ifnum"
+			return 0
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+	return 1
+}
+
+is_air720_tty() {
+	air720_ifnum "$1" >/dev/null 2>&1
+}
+
 find_port() {
 	configured="$(uci -q get air720.main.ppp_port || true)"
-	if [ -n "$configured" ] && [ -c "$configured" ]; then
+	if [ -n "$configured" ] && is_air720_tty "$configured"; then
 		echo "$configured"
 		return 0
 	fi
 
-	for candidate in /dev/ttyUSB3 /dev/ttyUSB2 /dev/ttyUSB1 /dev/ttyUSB0; do
-		if [ -c "$candidate" ]; then
+	# In the default RNDIS/ECM + AT + PPP + DIAG composite layout, interface
+	# 03 is the expected PPP function.  After interfaces 00/01 are reserved,
+	# this is commonly ttyUSB1, but match the stable USB interface number.
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
+		case "$ifnum" in
+			03|3) echo "$candidate"; return 0 ;;
+		esac
+	done
+
+	# Fallback only to ports belonging to the Air720.  A manual UCI override
+	# remains authoritative for firmware variants with a different layout.
+	for candidate in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB4; do
+		if is_air720_tty "$candidate"; then
 			echo "$candidate"
 			return 0
 		fi
 	done
-
 	return 1
+}
+
+ensure_wan_zone() {
+	wan_zone="$(uci -q show firewall | sed -n "s/^\(firewall\.[^.]*\)\.name='wan'$/\1/p" | head -n1)"
+	[ -n "$wan_zone" ] || return 0
+	if ! uci -q get "${wan_zone}.network" 2>/dev/null | tr ' ' '\n' | grep -qx cellular; then
+		uci -q add_list "${wan_zone}.network=cellular"
+		uci -q commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	fi
+}
+
+configure_netifd() {
+	port="$1"
+	apn="$(uci -q get air720.main.apn || true)"
+	dialnumber="$(uci -q get air720.main.dialnumber || true)"
+	metric="$(uci -q get air720.main.metric || true)"
+	defaultroute="$(uci -q get air720.main.defaultroute || true)"
+	peerdns="$(uci -q get air720.main.peerdns || true)"
+
+	[ -n "$dialnumber" ] || dialnumber='*99#'
+	[ -n "$metric" ] || metric='20'
+	[ -n "$defaultroute" ] || defaultroute='1'
+	[ -n "$peerdns" ] || peerdns='1'
+
+	uci -q set network.cellular='interface'
+	uci -q set network.cellular.proto='air720'
+	uci -q set network.cellular.device="$port"
+	uci -q set network.cellular.apn="$apn"
+	uci -q set network.cellular.dialnumber="$dialnumber"
+	uci -q set network.cellular.metric="$metric"
+	uci -q set network.cellular.defaultroute="$defaultroute"
+	uci -q set network.cellular.peerdns="$peerdns"
+	uci -q commit network
+	ensure_wan_zone
 }
 
 case "$action" in
 	start)
 		port="$(find_port || true)"
 		if [ -z "$port" ]; then
-			echo "No Air720 MODEM serial port found."
-			echo "RNDIS is the recommended primary mode."
-			echo "For PPP fallback, run air720-bind and configure:"
-			echo "  uci set air720.main.ppp_port='/dev/ttyUSB3'; uci commit air720"
+			echo "No Air720S/SL PPP serial port was found." >&2
+			echo "Run air720-ports, then configure the modem port explicitly:" >&2
+			echo "  uci set air720.main.ppp_port='/dev/ttyUSB1'" >&2
+			echo "  uci set air720.main.apn='YOUR_APN'" >&2
+			echo "  uci commit air720" >&2
 			exit 1
 		fi
 
-		echo "Starting Air720 PPP fallback on $port"
-		exec pppd "$port" 115200 call air720
+		configure_netifd "$port"
+		echo "Starting OpenWrt netifd cellular PPP on $port"
+		ifup cellular
 		;;
 	stop)
-		if [ -r /var/run/air720-ppp.pid ]; then
-			kill "$(cat /var/run/air720-ppp.pid)" 2>/dev/null || true
-			rm -f /var/run/air720-ppp.pid
-		else
-			killall pppd 2>/dev/null || true
-		fi
+		ifdown cellular 2>/dev/null || true
+		;;
+	restart)
+		ifdown cellular 2>/dev/null || true
+		sleep 1
+		exec "$0" start
 		;;
 	status)
-		if [ -r /var/run/air720-ppp.pid ] && kill -0 "$(cat /var/run/air720-ppp.pid)" 2>/dev/null; then
-			echo "Air720 PPP is running, pid $(cat /var/run/air720-ppp.pid)"
-		else
-			echo "Air720 PPP is not running"
-			exit 1
-		fi
+		ubus call network.interface.cellular status
 		;;
 	*)
-		echo "Usage: air720-ppp {start|stop|status}"
+		echo "Usage: air720-ppp {start|stop|restart|status}" >&2
 		exit 2
 		;;
 esac
