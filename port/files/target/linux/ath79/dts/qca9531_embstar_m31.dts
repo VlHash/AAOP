@@ -74,6 +74,20 @@
 &spi {
 	status = "okay";
 
+	/*
+	 * Keep the onboard NOR on native CS0 and use a GPIO-backed CS for the
+	 * external TF/microSD slot. GPIO1 is the bring-up default; apply-m31.py
+	 * rewrites this cs-gpios entry from the workflow TF_CS_GPIO input.
+	 *
+	 * The Cellu-AR750S carrier schematic is not currently in this repository,
+	 * so verify the CS trace from the running production firmware or PCB before
+	 * relying on the default. JTAG is disabled so GPIOs in that mux group can be
+	 * used normally.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&jtag_disable_pins>;
+	cs-gpios = <0>, <&gpio 1 GPIO_ACTIVE_LOW>;
+
 	flash@0 {
 		compatible = "jedec,spi-nor";
 		reg = <0>;
@@ -126,6 +140,16 @@
 				};
 			};
 		};
+	};
+
+	microsd@1 {
+		compatible = "mmc-spi-slot";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		voltage-ranges = <3200 3400>;
+
+		/* No confirmed card-detect GPIO: poll for insert/remove events. */
+		broken-cd;
 	};
 };
 

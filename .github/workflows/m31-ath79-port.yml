@@ -8,6 +8,19 @@ on:
         required: true
         default: "v25.12.5"
         type: string
+      firmware_profile:
+        description: "Firmware profile: production keeps factory/debug tools; normal trims manufacturing-only tools"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - normal
+      tf_cs_gpio:
+        description: "GPIO used as TF/microSD SPI chip-select (0-17); GPIO1 is the provisional default"
+        required: true
+        default: "1"
+        type: string
       enable_air720sl:
         description: "Inject Air720SL kernel patch and PPPv4 + RNDIS/ECMv6 integration"
         required: true
@@ -67,6 +80,8 @@ env:
   DEVICE_CONFIG_SYMBOL: CONFIG_TARGET_ath79_generic_DEVICE_embstar_m31
   DEVICE_ID: embstar_m31
   DTS_NAME: qca9531_embstar_m31
+  FIRMWARE_PROFILE: ${{ inputs.firmware_profile }}
+  TF_CS_GPIO: ${{ inputs.tf_cs_gpio }}
   ENABLE_AIR720SL: ${{ inputs.enable_air720sl }}
   AIR720_USB_ID: 1286:4e3d
   AIR720_KERNEL_PATCH: target/linux/generic/pending-6.12/999-usb-serial-option-air720s.patch
@@ -94,7 +109,6 @@ jobs:
           echo "safe_ref=${safe_ref}" >> "$GITHUB_OUTPUT"
 
           mkdir -p \
-            "$EVIDENCE_DIR/vendor-embstar" \
             "$EVIDENCE_DIR/reference-ath79" \
             "$STATE_DIR/logs" \
             "$STATE_DIR/config" \
@@ -110,7 +124,12 @@ jobs:
             echo "openwrt_ref=${{ inputs.openwrt_ref }}"
             echo "embstar_vendor_commit=${EMBSTAR_VENDOR_COMMIT}"
             echo "device=${DEVICE_ID}"
+            echo "firmware_profile=${FIRMWARE_PROFILE}"
             echo "enable_air720sl=${ENABLE_AIR720SL}"
+            echo "tf_storage=mmc-spi"
+            echo "tf_cs_gpio=${TF_CS_GPIO}"
+            echo "usb_storage=enabled"
+            echo "ntfs3=enabled"
             if [[ "$ENABLE_AIR720SL" == "true" ]]; then
               echo "air720_usb_id=${AIR720_USB_ID}"
             fi
@@ -190,36 +209,19 @@ jobs:
           restore-keys: |
             m31-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.safe_ref }}-
 
-      - name: Collect Embstar vendor and current ath79 evidence
+      - name: Collect current ath79 storage references
         shell: bash
         run: |
           set -euo pipefail
-          vendor_raw="https://raw.githubusercontent.com/Embstar/QCA9531_OpenWrt/${EMBSTAR_VENDOR_COMMIT}"
-          vendor_files=(
-            "target/linux/ath79/dts/qca9531_embstar.dts"
-            "target/linux/ath79/image/generic.mk"
-            "target/linux/ath79/generic/base-files/etc/board.d/02_network"
-            "target/linux/ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata"
-            ".config"
-          )
-
-          for rel in "${vendor_files[@]}"; do
-            dst="$EVIDENCE_DIR/vendor-embstar/$rel"
-            mkdir -p "$(dirname "$dst")"
-            curl --fail --location --retry 4 "$vendor_raw/$rel" --output "$dst"
-          done
-
           refs=(
             "target/linux/ath79/dts/qca953x.dtsi"
-            "target/linux/ath79/dts/qca9531_glinet_gl-ar750.dts"
-            "target/linux/ath79/dts/qca9531_qxwlan_e600g.dtsi"
-            "target/linux/ath79/dts/qca9531_qxwlan_e600gac-v2-16m.dts"
             "target/linux/ath79/image/generic.mk"
             "target/linux/ath79/generic/base-files/etc/board.d/02_network"
             "package/kernel/linux/modules/fs.mk"
+            "package/kernel/linux/modules/other.mk"
+            "package/kernel/linux/modules/spi.mk"
             "package/kernel/linux/modules/usb.mk"
           )
-
           for rel in "${refs[@]}"; do
             if [[ -f "$OPENWRT_DIR/$rel" ]]; then
               dst="$EVIDENCE_DIR/reference-ath79/$rel"
@@ -236,15 +238,13 @@ jobs:
 
           rsync -a --exclude '.gitkeep' "$CONTROLLER_DIR/port/files/" "$OPENWRT_DIR/"
 
-          # Native OpenWrt proto ppp owns PPP. Remove both the old direct-pppd
-          # fallback and the superseded custom netifd proto from older bundles.
+          # Native OpenWrt proto ppp owns PPP. Remove superseded older files.
           rm -f \
             "$OPENWRT_DIR/files/etc/ppp/peers/air720" \
             "$OPENWRT_DIR/files/usr/libexec/air720-chat-disconnect" \
             "$OPENWRT_DIR/files/lib/netifd/proto/air720.sh"
 
-          # Air720SL is optional. The controller keeps its files beside the M31
-          # overlay, so strip them after rsync when the workflow switch is off.
+          # Air720SL is optional. Strip its overlay and kernel patch when off.
           if [[ "$ENABLE_AIR720SL" != "true" ]]; then
             air720_paths=(
               "files/etc/config/air720"
@@ -264,7 +264,12 @@ jobs:
             done
           fi
 
-          python3 "$CONTROLLER_DIR/port/apply-m31.py" "$OPENWRT_DIR"
+          if [[ ! "$TF_CS_GPIO" =~ ^([0-9]|1[0-7])$ ]]; then
+            echo "::error::tf_cs_gpio must be an integer from 0 to 17; got: $TF_CS_GPIO"
+            exit 2
+          fi
+
+          TF_CS_GPIO="$TF_CS_GPIO" python3 "$CONTROLLER_DIR/port/apply-m31.py" "$OPENWRT_DIR"
 
           for patch in "$CONTROLLER_DIR"/port/patches/*.patch; do
             echo "Checking extra patch: $patch"
@@ -288,7 +293,6 @@ jobs:
             test ! -e "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
             git -C "$OPENWRT_DIR" diff --check
           fi
-          git -C "$OPENWRT_DIR" status --short
 
       - name: Update and install feeds
         shell: bash
@@ -305,10 +309,25 @@ jobs:
           set -euo pipefail
           cp "$CONTROLLER_DIR/port/config.seed" .config
 
+          case "$FIRMWARE_PROFILE" in
+            production)
+              # Factory/production image keeps picocom for serial/AT bring-up and
+              # manufacturing diagnostics. LuCI package manager is common to both.
+              ;;
+            normal)
+              # Normal daily-use image drops only the manufacturing/debug terminal.
+              sed -i -E '/^CONFIG_PACKAGE_picocom=y$/d' .config
+              ;;
+            *)
+              echo "::error::Unknown firmware_profile: $FIRMWARE_PROFILE"
+              exit 2
+              ;;
+          esac
+
           if [[ "$ENABLE_AIR720SL" != "true" ]]; then
-            # config.seed documents the full validated image. Remove only modem
-            # selections for an M31-only build before running defconfig.
-            sed -i -E '/^CONFIG_PACKAGE_(luci-proto-ppp|kmod-usb-net|kmod-usb-net-cdc-ether|kmod-usb-net-rndis|kmod-usb-serial|kmod-usb-serial-wwan|kmod-usb-serial-option|kmod-ppp|ppp|chat|picocom|odhcpd-ipv6only)=y$/d' .config
+            # Remove modem-specific selections only. TF/microSD and general USB
+            # mass-storage/NTFS support remain enabled in every firmware profile.
+            sed -i -E '/^CONFIG_PACKAGE_(luci-proto-ppp|kmod-usb-net|kmod-usb-net-cdc-ether|kmod-usb-net-rndis|kmod-usb-serial|kmod-usb-serial-wwan|kmod-usb-serial-option|kmod-ppp|ppp|chat|odhcpd-ipv6only)=y$/d' .config
           fi
 
           rm -f tmp/.config-target.in tmp/.config-target.in.prereq
@@ -316,11 +335,21 @@ jobs:
 
           required_symbols=(
             "$DEVICE_CONFIG_SYMBOL"
-            CONFIG_PACKAGE_kmod-usb-storage
             CONFIG_PACKAGE_block-mount
+            CONFIG_PACKAGE_kmod-mmc
+            CONFIG_PACKAGE_kmod-mmc-spi
+            CONFIG_PACKAGE_kmod-usb-storage
             CONFIG_PACKAGE_kmod-fs-ext4
+            CONFIG_PACKAGE_kmod-fs-vfat
             CONFIG_PACKAGE_kmod-fs-ntfs3
           )
+
+          # LuCI package manager is intentionally available in both profiles.
+          required_symbols+=(CONFIG_PACKAGE_luci-app-package-manager)
+
+          if [[ "$FIRMWARE_PROFILE" == "production" ]]; then
+            required_symbols+=(CONFIG_PACKAGE_picocom)
+          fi
 
           if [[ "$ENABLE_AIR720SL" == "true" ]]; then
             required_symbols+=(
@@ -331,7 +360,6 @@ jobs:
               CONFIG_PACKAGE_kmod-ppp
               CONFIG_PACKAGE_ppp
               CONFIG_PACKAGE_chat
-              CONFIG_PACKAGE_picocom
               CONFIG_PACKAGE_odhcpd-ipv6only
             )
           fi
@@ -342,6 +370,11 @@ jobs:
               exit 2
             fi
           done
+
+          if [[ "$FIRMWARE_PROFILE" == "normal" ]] && grep -Fxq 'CONFIG_PACKAGE_picocom=y' .config; then
+            echo "::error::Normal ROM unexpectedly enables: CONFIG_PACKAGE_picocom=y"
+            exit 2
+          fi
 
           ./scripts/diffconfig.sh | tee "$STATE_DIR/config/baseline.diffconfig"
 
@@ -356,14 +389,16 @@ jobs:
           export EVIDENCE_DIR="$EVIDENCE_DIR"
           export STATE_DIR="$STATE_DIR"
           export CCACHE_DIR="$CCACHE_DIR"
+          export FIRMWARE_PROFILE="$FIRMWARE_PROFILE"
+          export TF_CS_GPIO="$TF_CS_GPIO"
           export LC_ALL=C
           export LANG=C
           owrt() { cd "\$OPENWRT_DIR"; }
-          owrt-env() { env | grep -E '^(OPENWRT_DIR|EVIDENCE_DIR|STATE_DIR|CCACHE_DIR)='; }
+          owrt-env() { env | grep -E '^(OPENWRT_DIR|EVIDENCE_DIR|STATE_DIR|CCACHE_DIR|FIRMWARE_PROFILE|TF_CS_GPIO)='; }
           port-status() {
             cd "\$OPENWRT_DIR" || return
             git status --short --branch
-            grep -E 'CONFIG_TARGET_ath79|embstar_m31|kmod-fs-(ext4|ntfs3)|kmod-usb-storage' .config || true
+            grep -E 'CONFIG_TARGET_ath79|embstar_m31|kmod-mmc|kmod-usb-storage|kmod-fs-(ext4|vfat|ntfs3)|block-mount|luci-app-package-manager|picocom' .config || true
           }
           EOF_ENV
 
@@ -534,17 +569,34 @@ jobs:
           set -euo pipefail
           make defconfig
           grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config
-          test -f "target/linux/ath79/dts/${DTS_NAME}.dts"
+          dts="target/linux/ath79/dts/${DTS_NAME}.dts"
+          test -f "$dts"
+          grep -q 'compatible = "mmc-spi-slot";' "$dts"
+          grep -q "cs-gpios = <0>, <&gpio ${TF_CS_GPIO} GPIO_ACTIVE_LOW>;" "$dts"
+          grep -q 'broken-cd;' "$dts"
+
           if [[ "$ENABLE_AIR720SL" == "true" ]]; then
             test -f "$AIR720_KERNEL_PATCH"
           else
             test ! -e "$AIR720_KERNEL_PATCH"
           fi
+
           grep -q '^define Device/embstar_m31$' target/linux/ath79/image/generic.mk
-          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ext4=y' .config
-          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ntfs3=y' .config
-          grep -Fxq 'CONFIG_PACKAGE_kmod-usb-storage=y' .config
           grep -Fxq 'CONFIG_PACKAGE_block-mount=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-mmc=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-mmc-spi=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-usb-storage=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ext4=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-vfat=y' .config
+          grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ntfs3=y' .config
+
+          grep -Fxq 'CONFIG_PACKAGE_luci-app-package-manager=y' .config
+          if [[ "$FIRMWARE_PROFILE" == "production" ]]; then
+            grep -Fxq 'CONFIG_PACKAGE_picocom=y' .config
+          else
+            ! grep -Fxq 'CONFIG_PACKAGE_picocom=y' .config
+          fi
+
           if [[ "$ENABLE_AIR720SL" == "true" ]]; then
             git diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
           else
@@ -583,6 +635,7 @@ jobs:
             else
               cp -a "$dtb" "$STATE_DIR/firmware/"
               dtc -I dtb -O dts "$dtb" > "$STATE_DIR/firmware/${DTS_NAME}.compiled.dts"
+              grep -q 'mmc-spi-slot' "$STATE_DIR/firmware/${DTS_NAME}.compiled.dts" || rc=4
             fi
           fi
 
@@ -598,18 +651,14 @@ jobs:
           option_c="$(find build_dir/target-mips_24kc_musl/linux-ath79_generic \
             -type f -path '*/linux-6.12*/drivers/usb/serial/option.c' -print -quit)"
           test -n "$option_c" && test -f "$option_c"
-
           grep -q '#define AIR720S_VENDOR_ID' "$option_c"
           grep -q '0x1286' "$option_c"
           grep -q '#define AIR720S_PRODUCT_ID' "$option_c"
           grep -q '0x4e3d' "$option_c"
           grep -q 'RSVD(0) | RSVD(1) | ZLP' "$option_c"
           grep -q 'reset_resume.*usb_wwan_resume' "$option_c"
-
-          {
-            echo "Air720 kernel source: $option_c"
-            grep -n -E 'AIR720S_|RSVD\(0\).*RSVD\(1\).*ZLP|reset_resume' "$option_c"
-          } | tee "$STATE_DIR/air720-kernel-validation.txt"
+          grep -n -E 'AIR720S_|RSVD\(0\).*RSVD\(1\).*ZLP|reset_resume' "$option_c" \
+            | tee "$STATE_DIR/air720-kernel-validation.txt"
 
       - name: Download remaining package sources
         if: ${{ inputs.full_image_after_target && steps.target_build.outcome == 'success' }}
@@ -654,11 +703,20 @@ jobs:
           test -n "$manifest" && test -f "$manifest"
 
           required_packages=(
-            kmod-usb-storage
             block-mount
+            kmod-mmc
+            kmod-mmc-spi
+            kmod-usb-storage
             kmod-fs-ext4
+            kmod-fs-vfat
             kmod-fs-ntfs3
           )
+
+          required_packages+=(luci-app-package-manager)
+
+          if [[ "$FIRMWARE_PROFILE" == "production" ]]; then
+            required_packages+=(picocom)
+          fi
 
           if [[ "$ENABLE_AIR720SL" == "true" ]]; then
             required_packages+=(
@@ -669,7 +727,6 @@ jobs:
               kmod-ppp
               ppp
               chat
-              picocom
               odhcpd-ipv6only
             )
           fi
@@ -681,9 +738,16 @@ jobs:
             fi
           done
 
+          if [[ "$FIRMWARE_PROFILE" == "normal" ]] && grep -Eq '^picocom([[:space:]]|$)' "$manifest"; then
+            echo "::error::Normal manifest unexpectedly contains: picocom"
+            exit 5
+          fi
+
           rootfs="$(find build_dir/target-mips_24kc_musl -maxdepth 2 -type d -name root-ath79 -print -quit)"
           test -n "$rootfs" && test -d "$rootfs"
           test -f "$rootfs/etc/config/fstab"
+          grep -q "option anon_mount '1'" "$rootfs/etc/config/fstab"
+          grep -q "option auto_mount '1'" "$rootfs/etc/config/fstab"
 
           # LuCI/netifd must use native proto ppp; the old custom protocol is gone.
           test ! -e "$rootfs/lib/netifd/proto/air720.sh"
@@ -770,7 +834,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: m31-port-state-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: m31-port-state-${{ inputs.firmware_profile }}-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.STATE_DIR }}
           if-no-files-found: error
           include-hidden-files: true
@@ -781,7 +845,7 @@ jobs:
         if: ${{ always() && hashFiles('openwrt/bin/targets/ath79/generic/*embstar_m31*') != '' }}
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: m31-firmware-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: m31-firmware-${{ inputs.firmware_profile }}-${{ steps.meta.outputs.safe_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.OPENWRT_DIR }}/bin/targets/ath79/generic/*embstar_m31*
             ${{ env.STATE_DIR }}/firmware
@@ -797,17 +861,23 @@ jobs:
             echo "# Embstar M31-128M16 ath79 port run"
             echo
             echo "- OpenWrt ref: \`${{ inputs.openwrt_ref }}\`"
+            echo "- Firmware profile: \`${FIRMWARE_PROFILE}\`"
             echo "- Air720SL integration enabled: \`${ENABLE_AIR720SL}\`"
             if [[ "$ENABLE_AIR720SL" == "true" ]]; then
               echo "- Air720 USB ID: \`${AIR720_USB_ID}\`"
               echo "- Air720 WAN: native PPP IPv4 + RNDIS/ECM IPv6 + LAN IPv6 relay"
-              echo "- Air720 kernel validation file: \`air720-kernel-validation.txt\`"
             fi
-            echo "- Storage support: \`ext4 + ntfs3 + usb-storage + block-mount\`"
+            if [[ "$FIRMWARE_PROFILE" == "production" ]]; then
+              echo "- Production profile: LuCI package manager + picocom retained for factory/debug work"
+            else
+              echo "- Normal profile: LuCI package manager retained; picocom removed"
+            fi
+            echo "- Removable storage: \`TF/MMC-over-SPI + USB mass-storage + ext4/vfat/ntfs3 + block-mount hotplug\`"
+            echo "- TF CS mapping: \`GPIO${TF_CS_GPIO} (workflow-selectable; GPIO1 is provisional default)\`"
             echo "- Target build outcome: \`${{ steps.target_build.outcome }}\`"
             echo "- Full build outcome: \`${{ steps.full_build.outcome }}\`"
             echo
-            echo "Download m31-port-state for logs, kernel validation and the exported OpenWrt patch."
+            echo "Download m31-port-state for logs, compiled DTS and the exported OpenWrt patch."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail when requested target validation failed
