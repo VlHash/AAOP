@@ -1,10 +1,10 @@
 58fb8c037b8ae2ae7732d5901ce5ed715945ee8a937669b5e51ebecde40b83df  ./.github/workflows/m31-ath79-port.yml
 e97a3104bf68e288deb0fbb0eca268954af860c05a7b0986d64d5daff96d1f93  ./BUNDLE-FILELIST.txt
 87ab4d9fe8aea10d53897c8044c3bd583d15a0093814f8356c85b0cb1bf3a02e  ./DELETE-OLD-FILES.txt
-ba8048606c404f79064387334b526fcd8c843ac96d7df3112a58c38118e1c2c6  ./PATCH-NOTES.md
+8c5f5feb5b11638097d1f86a8acf9152ec3378e864cdae6c290c3dff95cdb4e4  ./PATCH-NOTES.md
 9f4502de3e4855e2b0ee27ec957e7eec0ad138e4bf727d2932f3ff53b1e4611b  ./port/config.seed
 5d0b5e81df7352fc0cd51c3f274d5f62bfd1dc4872afcfb3acf7082493ffd005  ./port/files/files/etc/config/air720
-005cae9a839b30be9d77cabd29627a94fda14ee4a8171985dd2e1780113c583c  ./port/files/files/etc/hotplug.d/net/95-air720-rndis
+7f30ae60f281d9ec191f4837f02027960e76e9494649262858d1c95bda895a9d  ./port/files/files/etc/hotplug.d/net/95-air720-rndis
 73bdc69df00a1df770c78487b49951a3e2b1412af7a2283565b780f3610746a6  ./port/files/files/etc/init.d/air720
 887aaa324b8bdb02109704da05d01e8e75759efdc276e1ea8ae7bc0cdc5faeee  ./port/files/files/etc/uci-defaults/99-air720
 329b42f2baf0bb36a6b5676c5885eec2c2f72551760f768cd747e4461d5d073e  ./port/files/files/usr/bin/air720-ppp

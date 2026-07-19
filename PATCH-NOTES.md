@@ -128,7 +128,9 @@ The new `/etc/init.d/air720` service supports:
 
 `/etc/uci-defaults/99-air720` enables and starts the service on first boot.
 The network hotplug hook independently re-runs the IPv6 setup when a matching
-Air720 RNDIS/ECM interface appears, which also covers USB re-enumeration.
+Air720 RNDIS/ECM interface appears, which also covers USB re-enumeration. In
+`hybrid` mode, a successful CID5/RNDIS recovery also re-runs `air720-ppp start`, so USB interface 03 is re-discovered and native netifd PPP recreates
+CID1 and redials IPv4 after a manual Air720SL hardware reset.
 
 ## Kernel patch
 
