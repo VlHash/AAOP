@@ -8,6 +8,11 @@ on:
         required: true
         default: "v25.12.5"
         type: string
+      enable_air720sl:
+        description: "Inject Air720SL kernel patch and PPPv4 + RNDIS/ECMv6 integration"
+        required: true
+        default: true
+        type: boolean
       prepare_toolchain_before_ssh:
         description: "Build and validate host tools plus the MIPS toolchain before SSH"
         required: true
@@ -29,7 +34,7 @@ on:
         default: "0"
         type: string
       build_after_ssh:
-        description: "Run target/linux, DTB and Air720 kernel-patch validation after SSH"
+        description: "Run target/linux, DTB and optional Air720SL validation after SSH"
         required: true
         default: true
         type: boolean
@@ -62,6 +67,7 @@ env:
   DEVICE_CONFIG_SYMBOL: CONFIG_TARGET_ath79_generic_DEVICE_embstar_m31
   DEVICE_ID: embstar_m31
   DTS_NAME: qca9531_embstar_m31
+  ENABLE_AIR720SL: ${{ inputs.enable_air720sl }}
   AIR720_USB_ID: 1286:4e3d
   AIR720_KERNEL_PATCH: target/linux/generic/pending-6.12/999-usb-serial-option-air720s.patch
 
@@ -104,7 +110,10 @@ jobs:
             echo "openwrt_ref=${{ inputs.openwrt_ref }}"
             echo "embstar_vendor_commit=${EMBSTAR_VENDOR_COMMIT}"
             echo "device=${DEVICE_ID}"
-            echo "air720_usb_id=${AIR720_USB_ID}"
+            echo "enable_air720sl=${ENABLE_AIR720SL}"
+            if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+              echo "air720_usb_id=${AIR720_USB_ID}"
+            fi
             date -u +"started_utc=%Y-%m-%dT%H:%M:%SZ"
           } | tee "$STATE_DIR/run-metadata.txt"
 
@@ -227,11 +236,33 @@ jobs:
 
           rsync -a --exclude '.gitkeep' "$CONTROLLER_DIR/port/files/" "$OPENWRT_DIR/"
 
-          # Remove the superseded direct-pppd fallback if it is still present in
-          # an older controller checkout.  Cellular PPP is now owned by netifd.
+          # Native OpenWrt proto ppp owns PPP. Remove both the old direct-pppd
+          # fallback and the superseded custom netifd proto from older bundles.
           rm -f \
             "$OPENWRT_DIR/files/etc/ppp/peers/air720" \
-            "$OPENWRT_DIR/files/usr/libexec/air720-chat-disconnect"
+            "$OPENWRT_DIR/files/usr/libexec/air720-chat-disconnect" \
+            "$OPENWRT_DIR/files/lib/netifd/proto/air720.sh"
+
+          # Air720SL is optional. The controller keeps its files beside the M31
+          # overlay, so strip them after rsync when the workflow switch is off.
+          if [[ "$ENABLE_AIR720SL" != "true" ]]; then
+            air720_paths=(
+              "files/etc/config/air720"
+              "files/etc/init.d/air720"
+              "files/etc/uci-defaults/99-air720"
+              "files/etc/hotplug.d/net/95-air720-rndis"
+              "files/usr/bin/air720-at"
+              "files/usr/bin/air720-bind"
+              "files/usr/bin/air720-ports"
+              "files/usr/bin/air720-ppp"
+              "files/usr/bin/air720-rndis6"
+              "files/usr/libexec/air720-chat-connect"
+              "$AIR720_KERNEL_PATCH"
+            )
+            for rel in "${air720_paths[@]}"; do
+              rm -rf "$OPENWRT_DIR/$rel"
+            done
+          fi
 
           python3 "$CONTROLLER_DIR/port/apply-m31.py" "$OPENWRT_DIR"
 
@@ -247,12 +278,16 @@ jobs:
             fi
           done
 
-          test -f "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
-          grep -q 'AIR720S_VENDOR_ID' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
-          grep -q 'RSVD(0) | RSVD(1) | ZLP' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
-          grep -q 'reset_resume' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
-
-          git -C "$OPENWRT_DIR" diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            test -f "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+            grep -q 'AIR720S_VENDOR_ID' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+            grep -q 'RSVD(0) | RSVD(1) | ZLP' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+            grep -q 'reset_resume' "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+            git -C "$OPENWRT_DIR" diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
+          else
+            test ! -e "$OPENWRT_DIR/$AIR720_KERNEL_PATCH"
+            git -C "$OPENWRT_DIR" diff --check
+          fi
           git -C "$OPENWRT_DIR" status --short
 
       - name: Update and install feeds
@@ -269,21 +304,37 @@ jobs:
         run: |
           set -euo pipefail
           cp "$CONTROLLER_DIR/port/config.seed" .config
+
+          if [[ "$ENABLE_AIR720SL" != "true" ]]; then
+            # config.seed documents the full validated image. Remove only modem
+            # selections for an M31-only build before running defconfig.
+            sed -i -E '/^CONFIG_PACKAGE_(luci-proto-ppp|kmod-usb-net|kmod-usb-net-cdc-ether|kmod-usb-net-rndis|kmod-usb-serial|kmod-usb-serial-wwan|kmod-usb-serial-option|kmod-ppp|ppp|chat|picocom|odhcpd-ipv6only)=y$/d' .config
+          fi
+
           rm -f tmp/.config-target.in tmp/.config-target.in.prereq
           make defconfig
 
           required_symbols=(
             "$DEVICE_CONFIG_SYMBOL"
-            CONFIG_PACKAGE_kmod-usb-net-rndis
-            CONFIG_PACKAGE_kmod-usb-serial-option
-            CONFIG_PACKAGE_kmod-ppp
-            CONFIG_PACKAGE_ppp
-            CONFIG_PACKAGE_chat
             CONFIG_PACKAGE_kmod-usb-storage
             CONFIG_PACKAGE_block-mount
             CONFIG_PACKAGE_kmod-fs-ext4
             CONFIG_PACKAGE_kmod-fs-ntfs3
           )
+
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            required_symbols+=(
+              CONFIG_PACKAGE_luci-proto-ppp
+              CONFIG_PACKAGE_kmod-usb-net-rndis
+              CONFIG_PACKAGE_kmod-usb-net-cdc-ether
+              CONFIG_PACKAGE_kmod-usb-serial-option
+              CONFIG_PACKAGE_kmod-ppp
+              CONFIG_PACKAGE_ppp
+              CONFIG_PACKAGE_chat
+              CONFIG_PACKAGE_picocom
+              CONFIG_PACKAGE_odhcpd-ipv6only
+            )
+          fi
 
           for symbol in "${required_symbols[@]}"; do
             if ! grep -Fxq "${symbol}=y" .config; then
@@ -484,13 +535,21 @@ jobs:
           make defconfig
           grep -Fxq "${DEVICE_CONFIG_SYMBOL}=y" .config
           test -f "target/linux/ath79/dts/${DTS_NAME}.dts"
-          test -f "$AIR720_KERNEL_PATCH"
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            test -f "$AIR720_KERNEL_PATCH"
+          else
+            test ! -e "$AIR720_KERNEL_PATCH"
+          fi
           grep -q '^define Device/embstar_m31$' target/linux/ath79/image/generic.mk
           grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ext4=y' .config
           grep -Fxq 'CONFIG_PACKAGE_kmod-fs-ntfs3=y' .config
           grep -Fxq 'CONFIG_PACKAGE_kmod-usb-storage=y' .config
           grep -Fxq 'CONFIG_PACKAGE_block-mount=y' .config
-          git diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            git diff --check -- . ":(exclude)$AIR720_KERNEL_PATCH"
+          else
+            git diff --check
+          fi
           ./scripts/diffconfig.sh | tee "$STATE_DIR/config/pre-target-build.diffconfig"
 
       - name: Compile target/linux and M31 DTB
@@ -531,7 +590,7 @@ jobs:
           exit "$rc"
 
       - name: Verify Air720SL kernel patch in prepared Linux source
-        if: ${{ inputs.build_after_ssh && steps.target_build.outcome == 'success' }}
+        if: ${{ inputs.enable_air720sl && inputs.build_after_ssh && steps.target_build.outcome == 'success' }}
         shell: bash
         working-directory: ${{ env.OPENWRT_DIR }}
         run: |
@@ -595,16 +654,25 @@ jobs:
           test -n "$manifest" && test -f "$manifest"
 
           required_packages=(
-            kmod-usb-net-rndis
-            kmod-usb-serial-option
-            kmod-ppp
-            ppp
-            chat
             kmod-usb-storage
             block-mount
             kmod-fs-ext4
             kmod-fs-ntfs3
           )
+
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            required_packages+=(
+              luci-proto-ppp
+              kmod-usb-net-rndis
+              kmod-usb-net-cdc-ether
+              kmod-usb-serial-option
+              kmod-ppp
+              ppp
+              chat
+              picocom
+              odhcpd-ipv6only
+            )
+          fi
 
           for package in "${required_packages[@]}"; do
             if ! grep -Eq "^${package}([[:space:]]|$)" "$manifest"; then
@@ -615,12 +683,29 @@ jobs:
 
           rootfs="$(find build_dir/target-mips_24kc_musl -maxdepth 2 -type d -name root-ath79 -print -quit)"
           test -n "$rootfs" && test -d "$rootfs"
-          test -f "$rootfs/lib/netifd/proto/air720.sh"
-          test -f "$rootfs/etc/config/air720"
           test -f "$rootfs/etc/config/fstab"
-          test -f "$rootfs/etc/hotplug.d/net/95-air720-rndis"
-          test -x "$rootfs/usr/bin/air720-ppp"
-          test -x "$rootfs/usr/bin/air720-ports"
+
+          # LuCI/netifd must use native proto ppp; the old custom protocol is gone.
+          test ! -e "$rootfs/lib/netifd/proto/air720.sh"
+
+          if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+            test -f "$rootfs/etc/config/air720"
+            test -x "$rootfs/etc/init.d/air720"
+            test -x "$rootfs/etc/uci-defaults/99-air720"
+            test -x "$rootfs/etc/hotplug.d/net/95-air720-rndis"
+            test -x "$rootfs/usr/bin/air720-ppp"
+            test -x "$rootfs/usr/bin/air720-rndis6"
+            test -x "$rootfs/usr/bin/air720-ports"
+            test -x "$rootfs/usr/libexec/air720-chat-connect"
+            grep -q "proto='ppp'" "$rootfs/usr/bin/air720-ppp"
+            grep -q "pppname='air720-cellular'" "$rootfs/usr/bin/air720-ppp"
+            grep -q "CGDCONT=5" "$rootfs/usr/bin/air720-rndis6"
+            grep -q "CGACT=1,5" "$rootfs/usr/bin/air720-rndis6"
+          else
+            test ! -e "$rootfs/etc/config/air720"
+            test ! -e "$rootfs/usr/bin/air720-ppp"
+            test ! -e "$rootfs/usr/bin/air720-rndis6"
+          fi
 
           cp -a "$initramfs" "$sysupgrade" "$manifest" "$STATE_DIR/firmware/"
           find "$STATE_DIR/firmware" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort \
@@ -712,8 +797,12 @@ jobs:
             echo "# Embstar M31-128M16 ath79 port run"
             echo
             echo "- OpenWrt ref: \`${{ inputs.openwrt_ref }}\`"
-            echo "- Air720 USB ID: \`${AIR720_USB_ID}\`"
-            echo "- Air720 kernel validation file: \`air720-kernel-validation.txt\`"
+            echo "- Air720SL integration enabled: \`${ENABLE_AIR720SL}\`"
+            if [[ "$ENABLE_AIR720SL" == "true" ]]; then
+              echo "- Air720 USB ID: \`${AIR720_USB_ID}\`"
+              echo "- Air720 WAN: native PPP IPv4 + RNDIS/ECM IPv6 + LAN IPv6 relay"
+              echo "- Air720 kernel validation file: \`air720-kernel-validation.txt\`"
+            fi
             echo "- Storage support: \`ext4 + ntfs3 + usb-storage + block-mount\`"
             echo "- Target build outcome: \`${{ steps.target_build.outcome }}\`"
             echo "- Full build outcome: \`${{ steps.full_build.outcome }}\`"

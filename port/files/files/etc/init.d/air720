@@ -1,0 +1,39 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+
+start() {
+	mode="$(uci -q get air720.main.mode || echo hybrid)"
+	case "$mode" in
+		hybrid)
+			logger -t air720 "Starting PPPv4 + RNDIS/ECMv6 hybrid mode" 2>/dev/null || true
+			/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 &
+			/usr/bin/air720-rndis6 start >/tmp/air720-rndis6.log 2>&1 &
+			;;
+		ppp)
+			/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 &
+			;;
+		rndis6)
+			/usr/bin/air720-rndis6 start >/tmp/air720-rndis6.log 2>&1 &
+			;;
+		disabled|off|0)
+			return 0
+			;;
+		*)
+			echo "Unknown Air720 mode: $mode" >&2
+			return 1
+			;;
+	esac
+}
+
+stop() {
+	/usr/bin/air720-rndis6 stop >/dev/null 2>&1 || true
+	/usr/bin/air720-ppp stop >/dev/null 2>&1 || true
+}
+
+restart() {
+	stop
+	sleep 1
+	start
+}

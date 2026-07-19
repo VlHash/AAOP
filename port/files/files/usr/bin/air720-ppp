@@ -4,6 +4,13 @@ set -eu
 
 action="${1:-start}"
 
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
+
+log() {
+	logger -t air720-ppp "$*" 2>/dev/null || true
+}
+
 air720_ifnum() {
 	[ -c "$1" ] || return 1
 	tty="${1##*/}"
@@ -12,8 +19,8 @@ air720_ifnum() {
 	while [ -n "$p" ] && [ "$p" != / ]; do
 		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
 		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
-			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = 1286 ] && \
-			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = 4e3d ] || return 1
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
 			printf '%s\n' "$ifnum"
 			return 0
 		fi
@@ -34,9 +41,8 @@ find_port() {
 		return 0
 	fi
 
-	# In the default RNDIS/ECM + AT + PPP + DIAG composite layout, interface
-	# 03 is the expected PPP function.  After interfaces 00/01 are reserved,
-	# this is commonly ttyUSB1, but match the stable USB interface number.
+	# USB interface 03 is the validated PPP data function. Match the stable USB
+	# interface number instead of assuming that it will always be ttyUSB1.
 	for candidate in /dev/ttyUSB*; do
 		[ -c "$candidate" ] || continue
 		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
@@ -44,14 +50,19 @@ find_port() {
 			03|3) echo "$candidate"; return 0 ;;
 		esac
 	done
+	return 1
+}
 
-	# Fallback only to ports belonging to the Air720.  A manual UCI override
-	# remains authoritative for firmware variants with a different layout.
-	for candidate in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB4; do
-		if is_air720_tty "$candidate"; then
-			echo "$candidate"
+wait_for_port() {
+	count=0
+	while [ "$count" -lt 30 ]; do
+		port="$(find_port || true)"
+		[ -n "$port" ] && {
+			echo "$port"
 			return 0
-		fi
+		}
+		count=$((count + 1))
+		sleep 1
 	done
 	return 1
 }
@@ -68,43 +79,47 @@ ensure_wan_zone() {
 
 configure_netifd() {
 	port="$1"
-	apn="$(uci -q get air720.main.apn || true)"
-	dialnumber="$(uci -q get air720.main.dialnumber || true)"
 	metric="$(uci -q get air720.main.metric || true)"
 	defaultroute="$(uci -q get air720.main.defaultroute || true)"
 	peerdns="$(uci -q get air720.main.peerdns || true)"
 
-	[ -n "$dialnumber" ] || dialnumber='*99#'
 	[ -n "$metric" ] || metric='20'
 	[ -n "$defaultroute" ] || defaultroute='1'
 	[ -n "$peerdns" ] || peerdns='1'
 
+	# Native OpenWrt PPP owns pppd and exposes a normal LuCI PPP interface.
 	uci -q set network.cellular='interface'
-	uci -q set network.cellular.proto='air720'
+	uci -q set network.cellular.proto='ppp'
 	uci -q set network.cellular.device="$port"
-	uci -q set network.cellular.apn="$apn"
-	uci -q set network.cellular.dialnumber="$dialnumber"
+	uci -q set network.cellular.pppname='air720-cellular'
+	uci -q set network.cellular.ipv6='0'
+	uci -q set network.cellular.connect='/usr/libexec/air720-chat-connect'
+	uci -q set network.cellular.keepalive='5 1'
 	uci -q set network.cellular.metric="$metric"
 	uci -q set network.cellular.defaultroute="$defaultroute"
 	uci -q set network.cellular.peerdns="$peerdns"
+	uci -q set network.cellular.pppd_options='noaccomp nopcomp novj nobsdcomp noauth nocrtscts 115200'
+
+	# Remove fields used only by the superseded custom proto air720.
+	uci -q delete network.cellular.apn
+	uci -q delete network.cellular.dialnumber
+	uci -q delete network.cellular.delay
 	uci -q commit network
 	ensure_wan_zone
 }
 
 case "$action" in
 	start)
-		port="$(find_port || true)"
+		port="$(wait_for_port || true)"
 		if [ -z "$port" ]; then
-			echo "No Air720S/SL PPP serial port was found." >&2
-			echo "Run air720-ports, then configure the modem port explicitly:" >&2
-			echo "  uci set air720.main.ppp_port='/dev/ttyUSB1'" >&2
-			echo "  uci set air720.main.apn='YOUR_APN'" >&2
-			echo "  uci commit air720" >&2
+			echo "No Air720S/SL PPP serial port (USB interface 03) was found." >&2
+			echo "Run air720-ports and set air720.main.ppp_port if needed." >&2
 			exit 1
 		fi
-
+		uci -q set air720.main.ppp_port="$port"
+		uci -q commit air720
 		configure_netifd "$port"
-		echo "Starting OpenWrt netifd cellular PPP on $port"
+		log "Starting native OpenWrt PPP IPv4 on $port"
 		ifup cellular
 		;;
 	stop)

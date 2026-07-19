@@ -6,7 +6,8 @@ CURRENT-PROGRESS.md
 README-oolite-port.md
 OPENFRP-SETUP.md
 
-# Obsolete direct-pppd Air720 fallback files.  The new implementation uses
-# OpenWrt netifd via /lib/netifd/proto/air720.sh.
+# Obsolete Air720 files. Native OpenWrt proto ppp now owns PPP; the hybrid
+# helper handles CID5 RNDIS/ECM IPv6 and LAN IPv6 relay.
 port/files/files/etc/ppp/peers/air720
 port/files/files/usr/libexec/air720-chat-disconnect
+port/files/files/lib/netifd/proto/air720.sh

@@ -1,0 +1,281 @@
+#!/bin/sh
+
+set -eu
+
+action="${1:-start}"
+requested_iface="${2:-}"
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
+LOCKDIR=/var/lock/air720-rndis6.lock
+
+log() {
+	logger -t air720-rndis6 "$*" 2>/dev/null || true
+}
+
+release_lock() {
+	rm -rf "$LOCKDIR" 2>/dev/null || true
+}
+
+acquire_lock() {
+	mkdir -p /var/lock
+	if ! mkdir "$LOCKDIR" 2>/dev/null; then
+		oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+		if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+			return 1
+		fi
+		rm -rf "$LOCKDIR" 2>/dev/null || true
+		mkdir "$LOCKDIR" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCKDIR/pid"
+	trap release_lock EXIT
+	trap 'release_lock; exit 1' HUP INT TERM
+	return 0
+}
+
+usb_parent_matches() {
+	p="$(readlink -f "$1" 2>/dev/null || true)"
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ]
+			return $?
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+	return 1
+}
+
+air720_ifnum() {
+	[ -c "$1" ] || return 1
+	tty="${1##*/}"
+	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
+	ifnum=''
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
+			printf '%s\n' "$ifnum"
+			return 0
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+	return 1
+}
+
+find_at_port() {
+	configured="$(uci -q get air720.main.at_port || true)"
+	if [ -n "$configured" ] && [ -c "$configured" ]; then
+		ifnum="$(air720_ifnum "$configured" 2>/dev/null || true)"
+		case "$ifnum" in 02|2) echo "$configured"; return 0 ;; esac
+	fi
+
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
+		case "$ifnum" in
+			02|2) echo "$candidate"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+is_air720_netdev() {
+	iface="$1"
+	[ -e "/sys/class/net/$iface/device" ] || return 1
+	driver="$(basename "$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null || echo unknown)")"
+	case "$driver" in
+		rndis_host|cdc_ether) ;;
+		*) return 1 ;;
+	esac
+	usb_parent_matches "/sys/class/net/$iface/device"
+}
+
+find_rndis_iface() {
+	configured="$(uci -q get air720.main.rndis_device || true)"
+	if [ -n "$requested_iface" ] && is_air720_netdev "$requested_iface"; then
+		echo "$requested_iface"
+		return 0
+	fi
+	if [ -n "$configured" ] && is_air720_netdev "$configured"; then
+		echo "$configured"
+		return 0
+	fi
+	for path in /sys/class/net/*; do
+		[ -e "$path" ] || continue
+		iface="${path##*/}"
+		if is_air720_netdev "$iface"; then
+			echo "$iface"
+			return 0
+		fi
+	done
+	return 1
+}
+
+wait_for_at_port() {
+	count=0
+	while [ "$count" -lt 30 ]; do
+		port="$(find_at_port || true)"
+		[ -n "$port" ] && {
+			echo "$port"
+			return 0
+		}
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
+wait_for_rndis_iface() {
+	count=0
+	while [ "$count" -lt 30 ]; do
+		iface="$(find_rndis_iface || true)"
+		[ -n "$iface" ] && {
+			echo "$iface"
+			return 0
+		}
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
+activate_cid5() {
+	at_port="$1"
+	apn="$(uci -q get air720.main.apn || true)"
+	[ -n "$apn" ] || apn='3gnet'
+
+	# Keep this independent from PPP: ttyUSB0/USB interface 02 is the AT control
+	# port while native PPP owns ttyUSB1/USB interface 03.
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port"
+	/usr/sbin/chat -t 10 -s -v \
+		ABORT 'NO CARRIER' ABORT 'ERROR' \
+		'' 'AT' \
+		'OK' "AT+CGDCONT=5,\"IPV4V6\",\"$apn\"" \
+		'OK' <&3 >&3
+
+	# Some firmware revisions report an error when CID5 is already active. Do not
+	# tear the bearer down; a failed re-activation is therefore non-fatal.
+	/usr/sbin/chat -t 15 -s -v \
+		'' 'AT+CGACT=1,5' \
+		'OK' <&3 >&3 || true
+	exec 3>&-
+
+	uci -q set air720.main.at_port="$at_port"
+	uci -q commit air720
+}
+
+ensure_wan_zone() {
+	changed=0
+	wan_zone="$(uci -q show firewall | sed -n "s/^\(firewall\.[^.]*\)\.name='wan'$/\1/p" | head -n1)"
+	[ -n "$wan_zone" ] || return 0
+	for net in cellular cellular6; do
+		if ! uci -q get "${wan_zone}.network" 2>/dev/null | tr ' ' '\n' | grep -qx "$net"; then
+			uci -q add_list "${wan_zone}.network=$net"
+			changed=1
+		fi
+	done
+	if [ "$changed" -eq 1 ]; then
+		uci -q commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	fi
+}
+
+configure_relay() {
+	[ "$(uci -q get air720.main.lan_ipv6_relay || echo 1)" = 1 ] || return 0
+
+	# The Air720 RNDIS bearer exposes an on-link /64 but no delegated prefix in the
+	# validated deployment. Relay RA/DHCPv6/NDP so LAN hosts can use that same /64.
+	uci -q delete network.lan.ip6assign
+	uci -q set dhcp.lan.ra='relay'
+	uci -q set dhcp.lan.dhcpv6='relay'
+	uci -q set dhcp.lan.ndp='relay'
+
+	uci -q delete dhcp.cellular6
+	uci -q set dhcp.cellular6='dhcp'
+	uci -q set dhcp.cellular6.interface='cellular6'
+	uci -q set dhcp.cellular6.ignore='1'
+	uci -q set dhcp.cellular6.master='1'
+	uci -q set dhcp.cellular6.ra='relay'
+	uci -q set dhcp.cellular6.dhcpv6='relay'
+	uci -q set dhcp.cellular6.ndp='relay'
+
+	uci -q commit network
+	uci -q commit dhcp
+	/etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+}
+
+set_ipv6_sysctls() {
+	iface="$1"
+	[ -w "/proc/sys/net/ipv6/conf/$iface/disable_ipv6" ] && echo 0 > "/proc/sys/net/ipv6/conf/$iface/disable_ipv6"
+	[ -w "/proc/sys/net/ipv6/conf/$iface/accept_ra" ] && echo 2 > "/proc/sys/net/ipv6/conf/$iface/accept_ra"
+	[ -w "/proc/sys/net/ipv6/conf/$iface/autoconf" ] && echo 1 > "/proc/sys/net/ipv6/conf/$iface/autoconf"
+	[ -w "/proc/sys/net/ipv6/conf/$iface/accept_ra_pinfo" ] && echo 1 > "/proc/sys/net/ipv6/conf/$iface/accept_ra_pinfo"
+	[ -w "/proc/sys/net/ipv6/conf/$iface/addr_gen_mode" ] && echo 0 > "/proc/sys/net/ipv6/conf/$iface/addr_gen_mode"
+}
+
+configure_network() {
+	iface="$1"
+
+	ip link set "$iface" up 2>/dev/null || true
+	set_ipv6_sysctls "$iface"
+
+	uci -q set air720.main.rndis_device="$iface"
+	uci -q set network.cellular6='interface'
+	uci -q set network.cellular6.proto='dhcpv6'
+	uci -q set network.cellular6.device="$iface"
+	uci -q set network.cellular6.reqaddress='try'
+	uci -q set network.cellular6.reqprefix='no'
+	uci -q set network.cellular6.auto='1'
+	uci -q commit air720
+	uci -q commit network
+
+	ensure_wan_zone
+	configure_relay
+}
+
+case "$action" in
+	start)
+		[ "$(uci -q get air720.main.rndis_ipv6 || echo 1)" = 1 ] || exit 0
+		acquire_lock || exit 0
+		iface="$(wait_for_rndis_iface || true)"
+		if [ -z "$iface" ]; then
+			echo "No Air720S/SL RNDIS/ECM network interface was found." >&2
+			exit 1
+		fi
+		configure_network "$iface"
+
+		at_port="$(wait_for_at_port || true)"
+		if [ -n "$at_port" ]; then
+			activate_cid5 "$at_port" || log "CID5 activation command failed; continuing in case the bearer is already active"
+		else
+			log "AT control port was not found; attempting cellular6 with existing CID5 state"
+		fi
+
+		log "Starting RNDIS/ECM IPv6 on $iface"
+		ifup cellular6
+		# netifd or forwarding sysctl updates may touch accept_ra during ifup.
+		# Re-assert the validated router-side RA settings after the interface starts.
+		sleep 1
+		set_ipv6_sysctls "$iface"
+		/etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+		;;
+	stop)
+		ifdown cellular6 2>/dev/null || true
+		;;
+	restart)
+		ifdown cellular6 2>/dev/null || true
+		sleep 1
+		exec "$0" start "$requested_iface"
+		;;
+	status)
+		ubus call network.interface.cellular6 status
+		;;
+	*)
+		echo "Usage: air720-rndis6 {start|stop|restart|status} [netdev]" >&2
+		exit 2
+		;;
+esac

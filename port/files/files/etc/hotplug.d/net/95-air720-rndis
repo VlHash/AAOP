@@ -1,8 +1,18 @@
 #!/bin/sh
 
-[ "$ACTION" = add ] || exit 0
 [ -n "$INTERFACE" ] || exit 0
-[ "$(uci -q get air720.main.rndis_fallback || echo 0)" = 1 ] || exit 0
+
+case "$ACTION" in
+	remove)
+		configured="$(uci -q get air720.main.rndis_device || true)"
+		[ "$configured" = "$INTERFACE" ] && ifdown cellular6 >/dev/null 2>&1 || true
+		exit 0
+		;;
+	add) ;;
+	*) exit 0 ;;
+esac
+
+[ "$(uci -q get air720.main.rndis_ipv6 || echo 1)" = 1 ] || exit 0
 [ -e "/sys/class/net/$INTERFACE/device/driver" ] || exit 0
 
 driver="$(basename "$(readlink -f "/sys/class/net/$INTERFACE/device/driver")")"
@@ -11,8 +21,7 @@ case "$driver" in
 	*) exit 0 ;;
 esac
 
-# Restrict this hook to the Luat Air720S/SL USB device.  The previous version
-# treated every RNDIS/CDC Ethernet dongle as the cellular modem.
+# Restrict this hook to the Luat Air720S/SL USB device 1286:4e3d.
 p="$(readlink -f "/sys/class/net/$INTERFACE/device")"
 match=0
 while [ -n "$p" ] && [ "$p" != / ]; do
@@ -27,19 +36,7 @@ while [ -n "$p" ] && [ "$p" != / ]; do
 done
 [ "$match" -eq 1 ] || exit 0
 
-uci -q set network.cellular='interface'
-uci -q set network.cellular.device="$INTERFACE"
-uci -q set network.cellular.proto='dhcp'
-uci -q set network.cellular.metric="$(uci -q get air720.main.metric || echo 20)"
-uci -q commit network
-
-wan_zone="$(uci -q show firewall | sed -n "s/^\(firewall\.[^.]*\)\.name='wan'$/\1/p" | head -n1)"
-if [ -n "$wan_zone" ]; then
-	if ! uci -q get "${wan_zone}.network" 2>/dev/null | tr ' ' '\n' | grep -qx cellular; then
-		uci -q add_list "${wan_zone}.network=cellular"
-		uci -q commit firewall
-	fi
-fi
-
-ifup cellular >/dev/null 2>&1 &
+# Do not turn RNDIS into the IPv4 WAN. Native PPP owns IPv4; this network
+# function is used only for the validated IPv6 path and LAN IPv6 relay.
+/usr/bin/air720-rndis6 start "$INTERFACE" >/tmp/air720-rndis6-hotplug.log 2>&1 &
 exit 0
