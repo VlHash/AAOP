@@ -5,9 +5,19 @@ VID="${AIR720_VID:-1286}"
 PID="${AIR720_PID:-4e3d}"
 LOCKDIR=/var/lock/air720-signal.lock
 MODEM_LOCKDIR=/var/lock/air720-modem-control.lock
+CONTROL_LOCKDIR=/var/lock/air720-control.lock
 CACHE=/tmp/air720-signal.state
+HAVE_MODEM_LOCK=0
+
+release_modem_lock() {
+	if [ "$HAVE_MODEM_LOCK" -eq 1 ]; then
+		rm -rf "$MODEM_LOCKDIR" 2>/dev/null || true
+		HAVE_MODEM_LOCK=0
+	fi
+}
 
 release_lock() {
+	release_modem_lock
 	rm -rf "$LOCKDIR" 2>/dev/null || true
 }
 
@@ -80,10 +90,19 @@ refresh() {
 	trap release_lock EXIT
 	trap 'release_lock; exit 1' HUP INT TERM
 
-	# Never interfere with PPP ATD*99# or CID5 activation/reset.
-	if [ -d "$MODEM_LOCKDIR" ]; then
+	# Never start a signal query while an Air720 control transaction is active.
+	if [ -d "$CONTROL_LOCKDIR" ]; then
 		return 0
 	fi
+
+	# Own the same modem-control lock used by PPP, CID5 and CFUN reset. This closes
+	# the race where the Overview poll could issue AT+CSQ between a lock check and
+	# the reset code opening ttyUSB0.
+	if ! mkdir "$MODEM_LOCKDIR" 2>/dev/null; then
+		return 0
+	fi
+	printf '%s\n' "$$" > "$MODEM_LOCKDIR/pid"
+	HAVE_MODEM_LOCK=1
 
 	at_port="$(find_at_port || true)"
 	[ -n "$at_port" ] || { write_unknown; return 1; }

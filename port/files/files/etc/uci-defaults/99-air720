@@ -3,13 +3,11 @@
 /etc/init.d/air720-boot-reset enable
 /etc/init.d/air720 enable
 
-# The S25 symlink is created only now on the first boot, after rcS enumeration.
-# Perform the reset synchronously once before starting the data plane.
-if [ "$(uci -q get air720.main.reset_on_boot || echo 1)" = 1 ]; then
-	rm -f /tmp/air720-boot-reset.done
-	/usr/bin/air720-control boot-reset >/tmp/air720-boot-reset-firstboot.log 2>&1 || true
-fi
+# On the first boot the S25 symlink is created while uci-defaults is already
+# running. Execute the exact same reset service synchronously once. If rcS later
+# discovers S25, its done marker makes it a no-op instead of resetting during PPP.
+rm -f /tmp/air720-boot-reset.done
+/etc/init.d/air720-boot-reset start >/tmp/air720-boot-reset-firstboot.log 2>&1 || true
 
-touch /tmp/air720-boot-reset.done
 /etc/init.d/air720 start >/dev/null 2>&1 &
 exit 0

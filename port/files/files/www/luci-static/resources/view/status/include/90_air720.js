@@ -19,6 +19,9 @@ function statusText(up) {
 }
 
 function signalProgress(data) {
+	if (data.hardware_reset_required)
+		return E('span', {}, _('Unavailable — AT control channel not responding'));
+
 	if (data.signal_percent == null || data.signal_dbm == null)
 		return E('span', {}, _('Unknown'));
 
@@ -37,8 +40,19 @@ function signalProgress(data) {
 	]);
 }
 
+function hardwareResetWarning() {
+	return E('div', {
+		'class': 'alert-message warning',
+		'style': 'margin-bottom:1em'
+	}, [
+		E('strong', {}, _('Air720SL Hardware Reset Required')),
+		E('br'),
+		_('The modem AT control channel is not responding. Software reset is unavailable. Perform a hardware reset of the Air720SL module, then use "Check Again".')
+	]);
+}
+
 return baseclass.extend({
-	title: _('Air720SL Cellular'),
+	title: _('Cellular Panel'),
 
 	load: function() {
 		return L.resolveDefault(callAir720Status(), {});
@@ -67,9 +81,13 @@ return baseclass.extend({
 		return this.handleAction('reconnect6');
 	},
 
+	handleCheck: function() {
+		return this.handleAction('check');
+	},
+
 	handleReset: function() {
 		if (!window.confirm(
-			_('Reset the Air720SL modem? Cellular IPv4 and IPv6 will be interrupted while AT+CFUN=1,1 restarts the modem.')
+			_('Reset the Air720SL modem? Cellular IPv4 and IPv6 will be interrupted while restarts the modem.')
 		))
 			return;
 
@@ -78,52 +96,76 @@ return baseclass.extend({
 
 	render: function(data) {
 		data = data || {};
-		var disabled = data.busy ? '' : null;
 
-		return E([
-			E('table', { 'class': 'table' }, [
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left', 'width': '33%' }, _('Modem')),
-					E('td', { 'class': 'td left' }, data.modem_present ? _('Present') : _('Not detected'))
-				]),
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, _('Signal')),
-					E('td', { 'class': 'td left' }, signalProgress(data))
-				]),
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, _('IPv4 PPP')),
-					E('td', { 'class': 'td left' },
-						'%s%s'.format(statusText(data.ipv4_up),
-							data.ipv4_address ? ' — ' + data.ipv4_address : ''))
-				]),
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, _('IPv6 RNDIS/ECM')),
-					E('td', { 'class': 'td left' },
-						'%s%s'.format(statusText(data.ipv6_up),
-							data.ipv6_address ? ' — ' + data.ipv6_address : ''))
-				]),
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, _('Control state')),
-					E('td', { 'class': 'td left' }, data.state || _('idle'))
-				])
+		var busy = data.busy ? '' : null;
+		var softwareDisabled = (data.busy || data.hardware_reset_required) ? '' : null;
+		var checkDisabled = data.busy ? '' : null;
+
+		var body = [];
+
+		if (data.hardware_reset_required)
+			body.push(hardwareResetWarning());
+
+		body.push(E('table', { 'class': 'table' }, [
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left', 'width': '33%' }, _('Modem')),
+				E('td', { 'class': 'td left' }, data.modem_present ? _('Present') : _('Not detected'))
 			]),
-			E('div', { 'style': 'display:flex; gap:.5em; flex-wrap:wrap; margin-top:1em' }, [
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('Signal')),
+				E('td', { 'class': 'td left' }, signalProgress(data))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('IPv4 PPP')),
+				E('td', { 'class': 'td left' },
+					'%s%s'.format(statusText(data.ipv4_up),
+						data.ipv4_address ? ' — ' + data.ipv4_address : ''))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('IPv6 RNDIS/ECM')),
+				E('td', { 'class': 'td left' },
+					'%s%s'.format(statusText(data.ipv6_up),
+						data.ipv6_address ? ' — ' + data.ipv6_address : ''))
+			]),
+			E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, _('Control state')),
+				E('td', { 'class': 'td left' }, data.state || _('idle'))
+			])
+		]));
+
+		if (data.hardware_reset_required) {
+			body.push(E('div', { 'style': 'display:flex; gap:.5em; flex-wrap:wrap; margin-top:1em' }, [
 				E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'disabled': disabled,
+					'disabled': checkDisabled,
+					'click': ui.createHandlerFn(this, 'handleCheck')
+				}, _('Check Again')),
+				E('button', {
+					'class': 'cbi-button',
+					'disabled': '',
+				}, _('Reset Modem'))
+			]));
+		}
+		else {
+			body.push(E('div', { 'style': 'display:flex; gap:.5em; flex-wrap:wrap; margin-top:1em' }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-action',
+					'disabled': softwareDisabled,
 					'click': ui.createHandlerFn(this, 'handleRedial')
 				}, _('Re-dial PPP')),
 				E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'disabled': disabled,
+					'disabled': softwareDisabled,
 					'click': ui.createHandlerFn(this, 'handleReconnect6')
 				}, _('Reconnect IPv6')),
 				E('button', {
 					'class': 'cbi-button cbi-button-negative important',
-					'disabled': disabled,
+					'disabled': softwareDisabled,
 					'click': ui.createHandlerFn(this, 'handleReset')
 				}, _('Reset Modem'))
-			])
-		]);
+			]));
+		}
+
+		return E(body);
 	}
 });

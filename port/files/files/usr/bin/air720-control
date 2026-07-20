@@ -5,50 +5,125 @@ action="${1:-status}"
 VID="${AIR720_VID:-1286}"
 PID="${AIR720_PID:-4e3d}"
 LOCKDIR=/var/lock/air720-control.lock
+MODEM_LOCKDIR=/var/lock/air720-modem-control.lock
 STATEFILE=/tmp/air720-control.state
+HAVE_MODEM_LOCK=0
 
-log() { logger -t air720-control "$*" 2>/dev/null || true; }
-set_state() { printf '%s\n' "$1" > "$STATEFILE"; log "state=$1"; }
-release_lock() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
+log() {
+	logger -t air720-control "$*" 2>/dev/null || true
+}
+
+get_state() {
+	cat "$STATEFILE" 2>/dev/null || echo idle
+}
+
+set_state() {
+	printf '%s\n' "$1" > "$STATEFILE"
+	log "state=$1"
+}
+
+release_modem_lock() {
+	if [ "$HAVE_MODEM_LOCK" -eq 1 ]; then
+		rm -rf "$MODEM_LOCKDIR" 2>/dev/null || true
+		HAVE_MODEM_LOCK=0
+	fi
+}
+
+release_lock() {
+	rm -rf "$LOCKDIR" 2>/dev/null || true
+}
+
+cleanup() {
+	release_modem_lock
+	release_lock
+}
 
 acquire_lock() {
 	mkdir -p /var/lock
+
 	if ! mkdir "$LOCKDIR" 2>/dev/null; then
 		oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
-		if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then return 1; fi
+		if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+			return 1
+		fi
+
 		rm -rf "$LOCKDIR" 2>/dev/null || true
 		mkdir "$LOCKDIR" 2>/dev/null || return 1
 	fi
+
 	printf '%s\n' "$$" > "$LOCKDIR/pid"
-	trap release_lock EXIT
-	trap 'release_lock; exit 1' HUP INT TERM
+	trap cleanup EXIT
+	trap 'cleanup; exit 1' HUP INT TERM
+	return 0
+}
+
+acquire_modem_lock() {
+	mkdir -p /var/lock
+	count=0
+
+	while [ "$count" -lt 45 ]; do
+		if mkdir "$MODEM_LOCKDIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$MODEM_LOCKDIR/pid"
+			HAVE_MODEM_LOCK=1
+			return 0
+		fi
+
+		oldpid="$(cat "$MODEM_LOCKDIR/pid" 2>/dev/null || true)"
+		if [ -n "$oldpid" ] && ! kill -0 "$oldpid" 2>/dev/null; then
+			rm -rf "$MODEM_LOCKDIR" 2>/dev/null || true
+			continue
+		fi
+
+		count=$((count + 1))
+		sleep 1
+	done
+
+	return 1
 }
 
 iface_up() {
-	ubus call "network.interface.$1" status 2>/dev/null | grep -Eq '"up"[[:space:]]*:[[:space:]]*true'
+	ubus call "network.interface.$1" status 2>/dev/null | \
+		grep -Eq '"up"[[:space:]]*:[[:space:]]*true'
 }
 
 wait_iface_up() {
-	name="$1"; timeout="$2"; count=0
+	name="$1"
+	timeout="$2"
+	count=0
+
 	while [ "$count" -lt "$timeout" ]; do
 		iface_up "$name" && return 0
-		count=$((count + 1)); sleep 1
+		count=$((count + 1))
+		sleep 1
 	done
+
 	return 1
 }
 
 wait_pppd_gone() {
 	count=0
+
 	while [ "$count" -lt 15 ]; do
 		found=0
+
 		for proc in /proc/[0-9]*; do
 			[ -r "$proc/cmdline" ] || continue
 			cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
-			case "$cmd" in *"ipparam cellular"*) found=1; break ;; esac
+
+			case "$cmd" in
+				*"ipparam cellular"*)
+					found=1
+					break
+					;;
+			esac
 		done
+
 		[ "$found" -eq 0 ] && return 0
-		count=$((count + 1)); sleep 1
+
+		count=$((count + 1))
+		sleep 1
 	done
+
 	return 1
 }
 
@@ -56,27 +131,39 @@ kill_stale_cellular_pppd() {
 	for proc in /proc/[0-9]*; do
 		[ -r "$proc/cmdline" ] || continue
 		cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+
 		case "$cmd" in
-			*"ipparam cellular"*) kill -TERM "${proc##*/}" 2>/dev/null || true ;;
+			*"ipparam cellular"*)
+				kill -TERM "${proc##*/}" 2>/dev/null || true
+				;;
 		esac
 	done
+
 	sleep 2
 }
 
 air720_ifnum() {
 	[ -c "$1" ] || return 1
+
 	tty="${1##*/}"
 	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
 	ifnum=''
+
 	while [ -n "$p" ] && [ "$p" != / ]; do
 		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+
 		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
 			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
-			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
-			printf '%s\n' "$ifnum"; return 0
+				[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
+
+			printf '%s\n' "$ifnum"
+			return 0
 		fi
-		p="${p%/*}"; [ -n "$p" ] || p=/
+
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
 	done
+
 	return 1
 }
 
@@ -84,37 +171,186 @@ find_at_port() {
 	for candidate in /dev/ttyUSB*; do
 		[ -c "$candidate" ] || continue
 		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
-		case "$ifnum" in 02|2) echo "$candidate"; return 0 ;; esac
+
+		case "$ifnum" in
+			02|2)
+				echo "$candidate"
+				return 0
+				;;
+		esac
 	done
+
+	return 1
+}
+
+wait_for_at_port() {
+	timeout="${1:-90}"
+	count=0
+
+	while [ "$count" -lt "$timeout" ]; do
+		at_port="$(find_at_port || true)"
+
+		if [ -n "$at_port" ]; then
+			echo "$at_port"
+			return 0
+		fi
+
+		count=$((count + 1))
+		sleep 1
+	done
+
 	return 1
 }
 
 usb_present() {
 	for dev in /sys/bus/usb/devices/*; do
 		[ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ] || continue
+
 		vid="$(tr 'A-F' 'a-f' < "$dev/idVendor")"
 		pid="$(tr 'A-F' 'a-f' < "$dev/idProduct")"
+
 		[ "$vid" = "$VID" ] && [ "$pid" = "$PID" ] && return 0
 	done
+
 	return 1
 }
 
 wait_usb_absent() {
+	timeout="${1:-10}"
 	count=0
-	while [ "$count" -lt 20 ]; do
+
+	while [ "$count" -lt "$timeout" ]; do
 		usb_present || return 0
-		count=$((count + 1)); sleep 1
+		count=$((count + 1))
+		sleep 1
 	done
+
 	return 1
 }
 
-wait_usb_present() {
+at_responds_once() {
+	at_port="$1"
+
+	[ -c "$at_port" ] || return 1
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port" || return 1
+
+	/usr/sbin/chat -t 5 -s -v \
+		ABORT 'ERROR' \
+		'' 'AT' \
+		'OK' '' \
+		<&3 >&3
+
+	rc=$?
+	exec 3>&-
+	return "$rc"
+}
+
+modem_ready_once() {
+	at_port="$1"
+
+	[ -c "$at_port" ] || return 1
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port" || return 1
+
+	/usr/sbin/chat -t 5 -s -v \
+		ABORT 'ERROR' \
+		'' 'AT' \
+		'OK' 'AT+CPIN?' \
+		'READY' 'AT+CGATT?' \
+		'+CGATT: 1' '' \
+		<&3 >&3
+
+	rc=$?
+	exec 3>&-
+	return "$rc"
+}
+
+wait_modem_ready() {
+	timeout="${1:-120}"
 	count=0
-	while [ "$count" -lt 90 ]; do
-		usb_present && return 0
-		count=$((count + 1)); sleep 1
+
+	while [ "$count" -lt "$timeout" ]; do
+		at_port="$(find_at_port || true)"
+
+		if [ -n "$at_port" ] && modem_ready_once "$at_port"; then
+			sleep 3
+			return 0
+		fi
+
+		count=$((count + 2))
+		sleep 2
 	done
+
 	return 1
+}
+
+issue_cfun_reset() {
+	at_port="$1"
+
+	[ -c "$at_port" ] || return 1
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port" || return 1
+
+	# AT responsiveness is checked by the caller. Send CFUN directly and do not
+	# require a final OK because the modem may restart before it is observable.
+	printf 'AT+CFUN=1,1\r' >&3
+	sleep 1
+	exec 3>&-
+	return 0
+}
+
+set_hardware_reset_required() {
+	reason="${1:-at-unresponsive}"
+	set_state hardware-reset-required
+	log "Hardware reset required: $reason"
+}
+
+reset_modem_and_wait_ready() {
+	state_prefix="$1"
+
+	if ! acquire_modem_lock; then
+		set_hardware_reset_required modem-lock-timeout
+		return 2
+	fi
+
+	set_state "${state_prefix}-waiting-at-port"
+	at_port="$(wait_for_at_port 60 || true)"
+
+	if [ -z "$at_port" ]; then
+		release_modem_lock
+		set_hardware_reset_required no-at-port
+		return 2
+	fi
+
+	set_state "${state_prefix}-checking-at"
+	if ! at_responds_once "$at_port"; then
+		release_modem_lock
+		set_hardware_reset_required at-unresponsive
+		return 2
+	fi
+
+	set_state "${state_prefix}-resetting-modem"
+	if ! issue_cfun_reset "$at_port"; then
+		release_modem_lock
+		set_hardware_reset_required cfun-send-failed
+		return 2
+	fi
+
+	set_state "${state_prefix}-waiting-reset-settle"
+	sleep 5
+	wait_usb_absent 10 || true
+
+	set_state "${state_prefix}-waiting-modem-ready"
+	if ! wait_modem_ready 120; then
+		release_modem_lock
+		set_hardware_reset_required modem-not-ready-after-cfun
+		return 2
+	fi
+
+	release_modem_lock
+	set_state "${state_prefix}-ready"
+	return 0
 }
 
 start_serialized() {
@@ -123,6 +359,7 @@ start_serialized() {
 	/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 || true
 
 	ppp_ok=0
+
 	if wait_iface_up cellular 60; then
 		ppp_ok=1
 		set_state ppp-up
@@ -130,27 +367,36 @@ start_serialized() {
 		set_state ppp-failed
 	fi
 
-	# CID5 starts only after the PPP attempt completes.
 	set_state ipv6-connecting
 	/usr/bin/air720-rndis6 start >/tmp/air720-rndis6.log 2>&1 || true
 
 	v6_ok=0
-	if wait_iface_up cellular6 60; then v6_ok=1; fi
+	if wait_iface_up cellular6 60; then
+		v6_ok=1
+	fi
 
 	if [ "$ppp_ok" -eq 1 ] && [ "$v6_ok" -eq 1 ]; then
 		set_state online
 		return 0
 	fi
+
 	set_state partial
 	return 1
 }
 
 redial_ppp() {
 	set_state redialing
+
 	ifdown cellular >/dev/null 2>&1 || true
 	wait_pppd_gone || kill_stale_cellular_pppd
+
 	/usr/bin/air720-ppp start >/tmp/air720-ppp-redial.log 2>&1 || true
-	wait_iface_up cellular 60 && { set_state online; return 0; }
+
+	if wait_iface_up cellular 60; then
+		set_state online
+		return 0
+	fi
+
 	set_state ppp-failed
 	return 1
 }
@@ -158,117 +404,144 @@ redial_ppp() {
 reconnect_ipv6() {
 	set_state ipv6-reconnecting
 	/usr/bin/air720-rndis6 restart >/tmp/air720-rndis6-reconnect.log 2>&1 || true
-	wait_iface_up cellular6 60 && { set_state online; return 0; }
+
+	if wait_iface_up cellular6 60; then
+		set_state online
+		return 0
+	fi
+
 	set_state ipv6-failed
 	return 1
+}
+
+check_after_hardware_reset() {
+	set_state hardware-reset-checking
+
+	if ! acquire_modem_lock; then
+		set_hardware_reset_required modem-lock-timeout
+		return 2
+	fi
+
+	at_port="$(wait_for_at_port 30 || true)"
+	if [ -z "$at_port" ]; then
+		release_modem_lock
+		set_hardware_reset_required no-at-port
+		return 2
+	fi
+
+	if ! at_responds_once "$at_port"; then
+		release_modem_lock
+		set_hardware_reset_required at-still-unresponsive
+		return 2
+	fi
+
+	set_state hardware-reset-waiting-modem-ready
+	if ! wait_modem_ready 120; then
+		release_modem_lock
+		set_hardware_reset_required modem-not-ready
+		return 2
+	fi
+
+	release_modem_lock
+	set_state hardware-reset-recovered
+	start_serialized
 }
 
 software_reset() {
 	set_state reset-stopping-links
 
-	# Stop PPP retry activity before AT+CFUN=1,1.
 	uci -q set network.cellular.auto='0'
 	uci -q commit network
 	ubus call network reload >/dev/null 2>&1 || true
+
 	ifdown cellular >/dev/null 2>&1 || true
 	ifdown cellular6 >/dev/null 2>&1 || true
+
 	wait_pppd_gone || kill_stale_cellular_pppd
 	sleep 2
 
-	at_port="$(find_at_port || true)"
-	if [ -z "$at_port" ]; then
-		set_state reset-no-at-port
-		return 1
+	if ! reset_modem_and_wait_ready reset; then
+		return $?
 	fi
-
-	set_state resetting-modem
-	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
-	exec 3<>"$at_port"
-	/usr/sbin/chat -t 12 -s -v \
-		ABORT 'ERROR' \
-		'' 'AT' \
-		'OK' 'AT+CFUN=1,1' \
-		'OK' <&3 >&3 || true
-	exec 3>&-
-
-	set_state waiting-usb-reset
-	wait_usb_absent || true
-	wait_usb_present || { set_state reset-usb-timeout; return 1; }
-	sleep 3
 
 	set_state reset-recovering
 	start_serialized
 }
 
-
 boot_reset_only() {
-	set_state boot-resetting-modem
+	set_state boot-reset-stopping-links
 
-	# The OpenWrt core board can reboot without removing power from the Air720SL.
-	# Reset the modem before the cellular service starts, but do not start the
-	# data plane here; /etc/init.d/air720 will do that later at START=95.
 	ifdown cellular >/dev/null 2>&1 || true
 	ifdown cellular6 >/dev/null 2>&1 || true
+
 	wait_pppd_gone || kill_stale_cellular_pppd
 	sleep 1
 
-	at_port="$(find_at_port || true)"
-	if [ -z "$at_port" ]; then
-		set_state boot-reset-no-at-port
-		return 1
+	if ! reset_modem_and_wait_ready boot-reset; then
+		return $?
 	fi
 
-	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
-	exec 3<>"$at_port"
-	/usr/sbin/chat -t 12 -s -v \
-		ABORT 'ERROR' \
-		'' 'AT' \
-		'OK' 'AT+CFUN=1,1' \
-		'OK' <&3 >&3 || true
-	exec 3>&-
-
-	set_state boot-waiting-usb
-	wait_usb_absent || true
-	wait_usb_present || {
-		set_state boot-reset-usb-timeout
-		return 1
-	}
-
-	sleep 3
 	set_state boot-reset-done
 	return 0
 }
 
 case "$action" in
-	start|recover)
+	start)
 		acquire_lock || exit 0
+		[ "$(get_state)" = hardware-reset-required ] && exit 2
 		start_serialized
 		;;
+
+	recover)
+		acquire_lock || exit 0
+		if [ "$(get_state)" = hardware-reset-required ]; then
+			check_after_hardware_reset
+		else
+			start_serialized
+		fi
+		;;
+
+	check)
+		acquire_lock || exit 1
+		check_after_hardware_reset
+		;;
+
 	redial)
 		acquire_lock || exit 1
+		if [ "$(get_state)" = hardware-reset-required ]; then
+			exit 2
+		fi
 		redial_ppp
 		;;
+
 	reconnect6)
 		acquire_lock || exit 1
+		if [ "$(get_state)" = hardware-reset-required ]; then
+			exit 2
+		fi
 		reconnect_ipv6
 		;;
+
 	boot-reset)
 		acquire_lock || exit 1
 		boot_reset_only
 		;;
+
 	reset)
 		acquire_lock || exit 1
 		software_reset
 		;;
+
 	status)
-		printf 'state=%s\n' "$(cat "$STATEFILE" 2>/dev/null || echo idle)"
+		printf 'state=%s\n' "$(get_state)"
 		printf 'busy=%s\n' "$([ -d "$LOCKDIR" ] && echo 1 || echo 0)"
 		printf 'usb=%s\n' "$(usb_present && echo 1 || echo 0)"
 		printf 'cellular=%s\n' "$(iface_up cellular && echo up || echo down)"
 		printf 'cellular6=%s\n' "$(iface_up cellular6 && echo up || echo down)"
 		;;
+
 	*)
-		echo "Usage: air720-control {start|recover|redial|reconnect6|boot-reset|reset|status}" >&2
+		echo "Usage: air720-control {start|recover|check|redial|reconnect6|boot-reset|reset|status}" >&2
 		exit 2
 		;;
 esac

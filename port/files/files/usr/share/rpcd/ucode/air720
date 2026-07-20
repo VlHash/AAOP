@@ -52,16 +52,21 @@ const methods = {
 			const v4 = iface_status(ubus, 'cellular');
 			const v6 = iface_status(ubus, 'cellular6');
 			const state_text = readfile('/tmp/air720-control.state');
+			const state = state_text ? trim(state_text) : 'idle';
 			const signal = signal_state();
+			const busy = access('/var/lock/air720-control.lock') == true;
+			const hardware_reset_required = state == 'hardware-reset-required';
 
-			// Refresh in the background. The helper rate-limits itself and never
-			// touches ttyUSB0 while PPP/CID5/reset owns modem-control.lock.
-			system('/usr/bin/air720-signal refresh >/tmp/air720-signal.log 2>&1 &');
+			// Keep LuCI polling read-only during control operations. When hardware
+			// reset is required, do not repeatedly time out the dead AT channel.
+			if (!busy && !hardware_reset_required)
+				system('/usr/bin/air720-signal refresh >/tmp/air720-signal.log 2>&1 &');
 
 			return {
 				modem_present: modem_present(),
-				busy: access('/var/lock/air720-control.lock') == true,
-				state: state_text ? trim(state_text) : 'idle',
+				busy,
+				hardware_reset_required,
+				state,
 				ipv4_up: v4?.up == true,
 				ipv4_address: first_address(v4, 'ipv4-address'),
 				ipv6_up: v6?.up == true,
@@ -83,6 +88,7 @@ const methods = {
 			case 'redial':
 			case 'reconnect6':
 			case 'reset':
+			case 'check':
 				break;
 			default:
 				return { accepted: false, error: 'Unsupported Air720 action' };

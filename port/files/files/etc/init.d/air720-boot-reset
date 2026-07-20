@@ -7,6 +7,15 @@ start() {
 	mode="$(uci -q get air720.main.mode || echo hybrid)"
 	reset_on_boot="$(uci -q get air720.main.reset_on_boot || echo 1)"
 
+	# First-boot uci-defaults may already have completed the same synchronous
+	# reset before rcS reaches S25. Never reset the modem twice in one boot.
+	if [ -e /tmp/air720-boot-reset.done ]; then
+		logger -t air720-boot-reset \
+			"Boot reset already completed for this OpenWrt boot; skipping duplicate reset" \
+			2>/dev/null || true
+		return 0
+	fi
+
 	case "$mode" in
 		disabled|off|0)
 			touch /tmp/air720-boot-reset.done
@@ -19,11 +28,21 @@ start() {
 		return 0
 	fi
 
-	rm -f /tmp/air720-boot-reset.done
 	logger -t air720-boot-reset \
 		"Resetting Air720SL before cellular bring-up because modem power persists across OpenWrt reboot" \
 		2>/dev/null || true
 
-	/usr/bin/air720-control boot-reset >/tmp/air720-boot-reset.log 2>&1 || true
+	if /usr/bin/air720-control boot-reset >/tmp/air720-boot-reset.log 2>&1; then
+		logger -t air720-boot-reset \
+			"Air720SL boot reset completed; cellular bring-up may start" \
+			2>/dev/null || true
+	else
+		# Do not deadlock boot forever if the modem is absent. Hotplug will recover
+		# a subsequently attached modem. The failure remains visible in the log.
+		logger -t air720-boot-reset \
+			"Air720SL boot reset could not complete; releasing boot gate for hotplug recovery" \
+			2>/dev/null || true
+	fi
+
 	touch /tmp/air720-boot-reset.done
 }

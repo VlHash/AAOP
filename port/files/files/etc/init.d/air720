@@ -5,7 +5,7 @@ STOP=10
 
 wait_boot_reset() {
 	count=0
-	while [ "$count" -lt 120 ]; do
+	while [ "$count" -lt 150 ]; do
 		[ -e /tmp/air720-boot-reset.done ] && return 0
 		count=$((count + 1))
 		sleep 1
@@ -19,6 +19,11 @@ start() {
 	# S25 air720-boot-reset owns the modem reset on normal boots. The first-boot
 	# uci-defaults path also creates this marker after performing the same reset.
 	wait_boot_reset || logger -t air720 "Boot reset completion marker timed out" 2>/dev/null || true
+
+	if [ "$(cat /tmp/air720-control.state 2>/dev/null || echo idle)" = "hardware-reset-required" ]; then
+		logger -t air720 "Air720SL AT channel is unresponsive; hardware reset required, skipping cellular bring-up" 2>/dev/null || true
+		return 0
+	fi
 
 	case "$mode" in
 		hybrid)
