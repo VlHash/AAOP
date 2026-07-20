@@ -1,6 +1,5 @@
 #!/bin/sh
 
-/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare-firstboot.log 2>&1 || true
 /etc/init.d/air720 enable
 /etc/init.d/air720 start >/dev/null 2>&1 &
 exit 0

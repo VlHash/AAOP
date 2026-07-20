@@ -7,11 +7,9 @@ start() {
 	mode="$(uci -q get air720.main.mode || echo hybrid)"
 	case "$mode" in
 		hybrid)
-			/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare.log 2>&1 || true
 			/usr/bin/air720-control start >/tmp/air720-control-start.log 2>&1 &
 			;;
 		ppp)
-			/usr/bin/air720-ppp prepare >/tmp/air720-ppp-prepare.log 2>&1 || true
 			/usr/bin/air720-ppp start >/tmp/air720-ppp.log 2>&1 &
 			;;
 		rndis6)

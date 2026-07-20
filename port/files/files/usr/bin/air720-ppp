@@ -136,7 +136,7 @@ prepare_interface() {
 		uci -q delete air720.main.ppp_port || true
 	fi
 	uci -q commit air720
-	configure_netifd "$port" 0
+	configure_netifd "$port" 1
 }
 
 case "$action" in
