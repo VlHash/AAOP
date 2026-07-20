@@ -3,8 +3,23 @@
 START=95
 STOP=10
 
+wait_boot_reset() {
+	count=0
+	while [ "$count" -lt 120 ]; do
+		[ -e /tmp/air720-boot-reset.done ] && return 0
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
 start() {
 	mode="$(uci -q get air720.main.mode || echo hybrid)"
+
+	# S25 air720-boot-reset owns the modem reset on normal boots. The first-boot
+	# uci-defaults path also creates this marker after performing the same reset.
+	wait_boot_reset || logger -t air720 "Boot reset completion marker timed out" 2>/dev/null || true
+
 	case "$mode" in
 		hybrid)
 			/usr/bin/air720-control start >/tmp/air720-control-start.log 2>&1 &

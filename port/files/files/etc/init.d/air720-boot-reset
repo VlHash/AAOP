@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+
+START=25
+STOP=5
+
+start() {
+	mode="$(uci -q get air720.main.mode || echo hybrid)"
+	reset_on_boot="$(uci -q get air720.main.reset_on_boot || echo 1)"
+
+	case "$mode" in
+		disabled|off|0)
+			touch /tmp/air720-boot-reset.done
+			return 0
+			;;
+	esac
+
+	if [ "$reset_on_boot" != 1 ]; then
+		touch /tmp/air720-boot-reset.done
+		return 0
+	fi
+
+	rm -f /tmp/air720-boot-reset.done
+	logger -t air720-boot-reset \
+		"Resetting Air720SL before cellular bring-up because modem power persists across OpenWrt reboot" \
+		2>/dev/null || true
+
+	/usr/bin/air720-control boot-reset >/tmp/air720-boot-reset.log 2>&1 || true
+	touch /tmp/air720-boot-reset.done
+}

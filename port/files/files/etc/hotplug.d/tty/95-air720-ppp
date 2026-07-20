@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Ignore USB enumeration events until the persistent-power modem boot reset completes.
+[ -e /tmp/air720-boot-reset.done ] || exit 0
+
 VID="${AIR720_VID:-1286}"
 PID="${AIR720_PID:-4e3d}"
 mode="$(uci -q get air720.main.mode || echo hybrid)"

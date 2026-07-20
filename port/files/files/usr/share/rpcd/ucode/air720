@@ -26,6 +26,25 @@ function first_address(status, family) {
 	return '';
 }
 
+function signal_state() {
+	let state = {};
+	let text = readfile('/tmp/air720-signal.state') || '';
+
+	for (let line in split(text, '\n')) {
+		let m = match(line, /^([^=]+)=(.*)$/);
+		if (m)
+			state[m[1]] = m[2];
+	}
+
+	return {
+		csq: state.csq ? +state.csq : 99,
+		ber: state.ber ? +state.ber : 99,
+		dbm: state.dbm ? +state.dbm : null,
+		percent: state.percent ? +state.percent : null,
+		updated: state.updated ? +state.updated : 0
+	};
+}
+
 const methods = {
 	status: {
 		call: function() {
@@ -33,6 +52,11 @@ const methods = {
 			const v4 = iface_status(ubus, 'cellular');
 			const v6 = iface_status(ubus, 'cellular6');
 			const state_text = readfile('/tmp/air720-control.state');
+			const signal = signal_state();
+
+			// Refresh in the background. The helper rate-limits itself and never
+			// touches ttyUSB0 while PPP/CID5/reset owns modem-control.lock.
+			system('/usr/bin/air720-signal refresh >/tmp/air720-signal.log 2>&1 &');
 
 			return {
 				modem_present: modem_present(),
@@ -41,7 +65,12 @@ const methods = {
 				ipv4_up: v4?.up == true,
 				ipv4_address: first_address(v4, 'ipv4-address'),
 				ipv6_up: v6?.up == true,
-				ipv6_address: first_address(v6, 'ipv6-address')
+				ipv6_address: first_address(v6, 'ipv6-address'),
+				signal_csq: signal.csq,
+				signal_ber: signal.ber,
+				signal_dbm: signal.dbm,
+				signal_percent: signal.percent,
+				signal_updated: signal.updated
 			};
 		}
 	},

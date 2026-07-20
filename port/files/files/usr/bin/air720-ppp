@@ -102,7 +102,7 @@ configure_netifd() {
 
 	uci -q set network.cellular='interface'
 	uci -q set network.cellular.proto='ppp'
-	uci -q set network.cellular.pppname='air720-cellular'
+	uci -q delete network.cellular.pppname || true
 	uci -q set network.cellular.ipv6='0'
 	uci -q set network.cellular.connect='/usr/libexec/air720-chat-connect'
 	uci -q set network.cellular.keepalive='5 1'

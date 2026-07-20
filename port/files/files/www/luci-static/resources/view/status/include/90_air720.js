@@ -18,6 +18,25 @@ function statusText(up) {
 	return up ? _('Connected') : _('Disconnected');
 }
 
+function signalProgress(data) {
+	if (data.signal_percent == null || data.signal_dbm == null)
+		return E('span', {}, _('Unknown'));
+
+	var percent = Math.max(0, Math.min(100, parseInt(data.signal_percent) || 0));
+	var csq = (data.signal_csq != null) ? data.signal_csq : '?';
+	var title = '%d%% / %d dBm / CSQ %s'.format(percent, data.signal_dbm, csq);
+
+	return E('div', { 'style': 'display:flex; align-items:center; gap:.75em; max-width:32em' }, [
+		E('div', {
+			'class': 'cbi-progressbar',
+			'title': title,
+			'style': 'flex:1'
+		}, E('div', { 'style': 'width:%d%%'.format(percent) })),
+		E('span', { 'style': 'white-space:nowrap' },
+			'%d%% (%d dBm, CSQ %s)'.format(percent, data.signal_dbm, csq))
+	]);
+}
+
 return baseclass.extend({
 	title: _('Air720SL Cellular'),
 
@@ -66,6 +85,10 @@ return baseclass.extend({
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left', 'width': '33%' }, _('Modem')),
 					E('td', { 'class': 'td left' }, data.modem_present ? _('Present') : _('Not detected'))
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' }, _('Signal')),
+					E('td', { 'class': 'td left' }, signalProgress(data))
 				]),
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, _('IPv4 PPP')),

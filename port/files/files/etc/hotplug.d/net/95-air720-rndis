@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Ignore USB enumeration events until the persistent-power modem boot reset completes.
+[ -e /tmp/air720-boot-reset.done ] || exit 0
+
 [ -n "${INTERFACE:-}" ] || exit 0
 
 case "${ACTION:-}" in

@@ -200,6 +200,45 @@ software_reset() {
 	start_serialized
 }
 
+
+boot_reset_only() {
+	set_state boot-resetting-modem
+
+	# The OpenWrt core board can reboot without removing power from the Air720SL.
+	# Reset the modem before the cellular service starts, but do not start the
+	# data plane here; /etc/init.d/air720 will do that later at START=95.
+	ifdown cellular >/dev/null 2>&1 || true
+	ifdown cellular6 >/dev/null 2>&1 || true
+	wait_pppd_gone || kill_stale_cellular_pppd
+	sleep 1
+
+	at_port="$(find_at_port || true)"
+	if [ -z "$at_port" ]; then
+		set_state boot-reset-no-at-port
+		return 1
+	fi
+
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port"
+	/usr/sbin/chat -t 12 -s -v \
+		ABORT 'ERROR' \
+		'' 'AT' \
+		'OK' 'AT+CFUN=1,1' \
+		'OK' <&3 >&3 || true
+	exec 3>&-
+
+	set_state boot-waiting-usb
+	wait_usb_absent || true
+	wait_usb_present || {
+		set_state boot-reset-usb-timeout
+		return 1
+	}
+
+	sleep 3
+	set_state boot-reset-done
+	return 0
+}
+
 case "$action" in
 	start|recover)
 		acquire_lock || exit 0
@@ -213,6 +252,10 @@ case "$action" in
 		acquire_lock || exit 1
 		reconnect_ipv6
 		;;
+	boot-reset)
+		acquire_lock || exit 1
+		boot_reset_only
+		;;
 	reset)
 		acquire_lock || exit 1
 		software_reset
@@ -225,7 +268,7 @@ case "$action" in
 		printf 'cellular6=%s\n' "$(iface_up cellular6 && echo up || echo down)"
 		;;
 	*)
-		echo "Usage: air720-control {start|recover|redial|reconnect6|reset|status}" >&2
+		echo "Usage: air720-control {start|recover|redial|reconnect6|boot-reset|reset|status}" >&2
 		exit 2
 		;;
 esac

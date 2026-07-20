@@ -1,0 +1,162 @@
+#!/bin/sh
+set -u
+
+VID="${AIR720_VID:-1286}"
+PID="${AIR720_PID:-4e3d}"
+LOCKDIR=/var/lock/air720-signal.lock
+MODEM_LOCKDIR=/var/lock/air720-modem-control.lock
+CACHE=/tmp/air720-signal.state
+
+release_lock() {
+	rm -rf "$LOCKDIR" 2>/dev/null || true
+}
+
+air720_ifnum() {
+	[ -c "$1" ] || return 1
+	tty="${1##*/}"
+	p="$(readlink -f "/sys/class/tty/$tty/device" 2>/dev/null || true)"
+	ifnum=''
+
+	while [ -n "$p" ] && [ "$p" != / ]; do
+		[ -n "$ifnum" ] || ifnum="$(cat "$p/bInterfaceNumber" 2>/dev/null || true)"
+		if [ -r "$p/idVendor" ] && [ -r "$p/idProduct" ]; then
+			[ "$(tr 'A-F' 'a-f' < "$p/idVendor")" = "$VID" ] && \
+			[ "$(tr 'A-F' 'a-f' < "$p/idProduct")" = "$PID" ] || return 1
+			printf '%s\n' "$ifnum"
+			return 0
+		fi
+		p="${p%/*}"
+		[ -n "$p" ] || p=/
+	done
+	return 1
+}
+
+find_at_port() {
+	configured="$(uci -q get air720.main.at_port || true)"
+	if [ -n "$configured" ] && [ -c "$configured" ]; then
+		ifnum="$(air720_ifnum "$configured" 2>/dev/null || true)"
+		case "$ifnum" in 02|2) echo "$configured"; return 0 ;; esac
+	fi
+
+	for candidate in /dev/ttyUSB*; do
+		[ -c "$candidate" ] || continue
+		ifnum="$(air720_ifnum "$candidate" 2>/dev/null || true)"
+		case "$ifnum" in 02|2) echo "$candidate"; return 0 ;; esac
+	done
+	return 1
+}
+
+cache_get() {
+	key="$1"
+	sed -n "s/^${key}=//p" "$CACHE" 2>/dev/null | head -n1
+}
+
+write_unknown() {
+	now="$(date +%s)"
+	{
+		echo "updated=$now"
+		echo "csq=99"
+		echo "ber=99"
+		echo "dbm="
+		echo "percent="
+	} > "$CACHE"
+}
+
+refresh() {
+	mkdir -p /var/lock
+	refresh_interval="$(uci -q get air720.main.signal_refresh || echo 10)"
+	case "$refresh_interval" in *[!0-9]*|'') refresh_interval=10 ;; esac
+
+	now="$(date +%s)"
+	last="$(cache_get updated)"
+	case "$last" in *[!0-9]*|'') last=0 ;; esac
+	if [ $((now - last)) -lt "$refresh_interval" ]; then
+		return 0
+	fi
+
+	if ! mkdir "$LOCKDIR" 2>/dev/null; then
+		return 0
+	fi
+	trap release_lock EXIT
+	trap 'release_lock; exit 1' HUP INT TERM
+
+	# Never interfere with PPP ATD*99# or CID5 activation/reset.
+	if [ -d "$MODEM_LOCKDIR" ]; then
+		return 0
+	fi
+
+	at_port="$(find_at_port || true)"
+	[ -n "$at_port" ] || { write_unknown; return 1; }
+
+	stty -F "$at_port" 115200 raw -echo -ixon -ixoff -crtscts 2>/dev/null || true
+	exec 3<>"$at_port"
+
+	# Drain a few pending unsolicited lines without blocking for long.
+	i=0
+	while [ "$i" -lt 3 ]; do
+		IFS= read -r -t 1 _line <&3 2>/dev/null || break
+		i=$((i + 1))
+	done
+
+	printf 'AT+CSQ\r' >&3
+
+	csq_line=''
+	i=0
+	while [ "$i" -lt 5 ]; do
+		if IFS= read -r -t 1 line <&3 2>/dev/null; then
+			line="$(printf '%s' "$line" | tr -d '\r')"
+			case "$line" in
+				*+CSQ:*)
+					csq_line="$line"
+					break
+					;;
+			esac
+		fi
+		i=$((i + 1))
+	done
+	exec 3>&-
+
+	if [ -z "$csq_line" ]; then
+		write_unknown
+		return 1
+	fi
+
+	values="${csq_line#*+CSQ:}"
+	values="$(printf '%s' "$values" | tr -d ' ')"
+	csq="${values%%,*}"
+	ber="${values#*,}"
+
+	case "$csq" in
+		''|*[!0-9]*|99)
+			dbm=''
+			percent=''
+			;;
+		*)
+			if [ "$csq" -gt 31 ]; then csq=31; fi
+			dbm=$((-113 + 2 * csq))
+			percent=$(((csq * 100 + 15) / 31))
+			;;
+	esac
+
+	now="$(date +%s)"
+	{
+		echo "updated=$now"
+		echo "csq=$csq"
+		echo "ber=$ber"
+		echo "dbm=$dbm"
+		echo "percent=$percent"
+	} > "$CACHE"
+}
+
+case "${1:-refresh}" in
+	refresh)
+		refresh
+		;;
+	status)
+		cat "$CACHE" 2>/dev/null || true
+		;;
+	*)
+		echo "Usage: air720-signal {refresh|status}" >&2
+		exit 2
+		;;
+esac

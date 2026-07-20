@@ -263,6 +263,8 @@ jobs:
               "files/usr/share/rpcd/ucode/air720"
               "files/usr/share/rpcd/acl.d/luci-air720.json"
               "files/www/luci-static/resources/view/status/include/90_air720.js"
+              "files/etc/init.d/air720-boot-reset"
+              "files/usr/bin/air720-signal"
             )
             for rel in "${air720_paths[@]}"; do
               rm -rf "$OPENWRT_DIR/$rel"
@@ -304,6 +306,8 @@ jobs:
               "files/usr/bin/air720-rndis6"
               "files/usr/libexec/air720-chat-connect"
               "files/usr/bin/air720-control"
+              "files/etc/init.d/air720-boot-reset"
+              "files/usr/bin/air720-signal"
             )
             for rel in "${air720_exec_paths[@]}"; do
               test -f "$OPENWRT_DIR/$rel"
@@ -785,10 +789,14 @@ jobs:
 
           if [[ "$ENABLE_AIR720SL" == "true" ]]; then
             test -f "$rootfs/etc/config/air720"
+            grep -q "option reset_on_boot '1'" "$rootfs/etc/config/air720"
+            grep -q "option signal_refresh '10'" "$rootfs/etc/config/air720"
             test -x "$rootfs/etc/init.d/air720"
+            test -x "$rootfs/etc/init.d/air720-boot-reset"
             test -x "$rootfs/etc/uci-defaults/99-air720"
             test -x "$rootfs/etc/hotplug.d/net/95-air720-rndis"
             test -x "$rootfs/usr/bin/air720-control"
+            test -x "$rootfs/usr/bin/air720-signal"
             test -f "$rootfs/usr/share/rpcd/ucode/air720"
             test -f "$rootfs/usr/share/rpcd/acl.d/luci-air720.json"
             test -f "$rootfs/www/luci-static/resources/view/status/include/90_air720.js"
@@ -800,10 +808,14 @@ jobs:
             test -x "$rootfs/usr/bin/air720-ports"
             test -x "$rootfs/usr/libexec/air720-chat-connect"
             grep -q "proto='ppp'" "$rootfs/usr/bin/air720-ppp"
-            grep -q "pppname='air720-cellular'" "$rootfs/usr/bin/air720-ppp"
+            grep -Fq "uci -q delete network.cellular.pppname || true" "$rootfs/usr/bin/air720-ppp"
             grep -q "air720-modem-control.lock" "$rootfs/usr/libexec/air720-chat-connect"
             grep -q "air720-modem-control.lock" "$rootfs/usr/bin/air720-rndis6"
             grep -q "AT+CFUN=1,1" "$rootfs/usr/bin/air720-control"
+            grep -q "boot-reset)" "$rootfs/usr/bin/air720-control"
+            grep -q "air720-control boot-reset" "$rootfs/etc/init.d/air720-boot-reset"
+            grep -q "AT+CSQ" "$rootfs/usr/bin/air720-signal"
+            grep -q "cbi-progressbar" "$rootfs/www/luci-static/resources/view/status/include/90_air720.js"
             grep -q "air720-control start" "$rootfs/etc/init.d/air720"
             grep -q "air720-control recover" "$rootfs/etc/hotplug.d/tty/95-air720-ppp"
             grep -q "air720-control recover" "$rootfs/etc/hotplug.d/net/95-air720-rndis"
